@@ -1,4 +1,4 @@
-./extracted_frames
-./extracted_frames_9182
-./labelled_frames
+extracted_frames/
+extracted_frames_9182/
+labelled_frames/
 *.MOV
