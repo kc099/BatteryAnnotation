@@ -155,6 +155,9 @@ python inference.py \
     --image_dir production_images/ \
     --output_path inspection_results.json \
     --norm_stats custom_normalization.json
+
+# With visualization
+python inference.py --model_path best_model.ckpt --image_path test.jpg --visualize --viz_output_dir predictions/
 ```
 
 ## 🏆 **Key Features**

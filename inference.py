@@ -13,6 +13,8 @@ import cv2
 import numpy as np
 from pathlib import Path
 import json
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 
 from model import HierarchicalQualityModel
 from dataset import get_validation_augmentations
@@ -37,7 +39,7 @@ class BatteryQualityInference:
         print(f"✅ Model loaded from {model_path}")
         print(f"🖥️  Using device: {self.device}")
     
-    def predict_single_image(self, image_path):
+    def predict_single_image(self, image_path, save_visualization=False, output_dir=None):
         """Predict quality for a single image"""
         
         # Load and preprocess image
@@ -46,10 +48,10 @@ class BatteryQualityInference:
             raise ValueError(f"Could not load image: {image_path}")
         
         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        h, w = image_rgb.shape[:2]
+        original_h, original_w = image_rgb.shape[:2]
         
         # Create dummy masks for transform (not used in inference)
-        dummy_masks = np.zeros((h, w, 6), dtype=np.float32)
+        dummy_masks = np.zeros((original_h, original_w, 6), dtype=np.float32)
         
         # Apply transforms
         transformed = self.transform(image=image_rgb, mask=dummy_masks)
@@ -71,8 +73,9 @@ class BatteryQualityInference:
             'overall_quality': self._get_quality_prediction(outputs['overall_quality']),
         }
         
-        # Add segmentation info
-        seg_probs = torch.sigmoid(outputs['segmentation']).squeeze().cpu().numpy()
+        # Get segmentation predictions (960x544)
+        seg_probs = torch.sigmoid(outputs['segmentation']).squeeze().cpu().numpy()  # Shape: (6, 544, 960)
+        
         predictions['segmentation'] = {
             'good_holes_pixels': int((seg_probs[0] > 0.5).sum()),
             'deformed_holes_pixels': int((seg_probs[1] > 0.5).sum()),
@@ -81,6 +84,19 @@ class BatteryQualityInference:
             'plus_knob_pixels': int((seg_probs[4] > 0.5).sum()),
             'minus_knob_pixels': int((seg_probs[5] > 0.5).sum()),
         }
+        
+        # Add visualization data
+        predictions['visualization_data'] = {
+            'original_image': image_rgb,
+            'seg_masks': seg_probs,  # 6 channels, 544x960
+            'original_size': (original_h, original_w),
+            'model_size': (544, 960)
+        }
+        
+        # Create visualization if requested
+        if save_visualization:
+            viz_path = self.create_visualization(image_path, predictions, output_dir)
+            predictions['visualization_path'] = viz_path
         
         return predictions
     
@@ -94,6 +110,113 @@ class BatteryQualityInference:
             'confidence': float(prob),
             'raw_score': float(prob)
         }
+    
+    def create_visualization(self, image_path, predictions, output_dir=None):
+        """Create visualization of predictions overlaid on original image"""
+        
+        viz_data = predictions['visualization_data']
+        original_image = viz_data['original_image']
+        seg_masks = viz_data['seg_masks']  # Shape: (6, 544, 960)
+        original_h, original_w = viz_data['original_size']
+        
+        # Resize masks back to original image size
+        resized_masks = []
+        for channel in range(6):
+            mask = seg_masks[channel]  # Shape: (544, 960)
+            # Resize to original image size
+            resized_mask = cv2.resize(mask, (original_w, original_h), interpolation=cv2.INTER_LINEAR)
+            resized_masks.append(resized_mask)
+        
+        resized_masks = np.stack(resized_masks, axis=0)  # Shape: (6, original_h, original_w)
+        
+        # Define colors for each mask channel
+        colors = [
+            [0, 255, 0],      # Channel 0: Good holes - Green
+            [255, 165, 0],    # Channel 1: Deformed holes - Orange  
+            [255, 0, 0],      # Channel 2: Blocked holes - Red
+            [0, 255, 255],    # Channel 3: Text - Cyan
+            [255, 0, 255],    # Channel 4: Plus knob - Magenta
+            [255, 255, 0],    # Channel 5: Minus knob - Yellow
+        ]
+        
+        labels = [
+            "Good Holes", "Deformed Holes", "Blocked Holes", 
+            "Text Region", "Plus Knob", "Minus Knob"
+        ]
+        
+        # Create figure with subplots
+        fig, axes = plt.subplots(2, 4, figsize=(20, 10))
+        
+        # Original image
+        axes[0, 0].imshow(original_image)
+        axes[0, 0].set_title('Original Image')
+        axes[0, 0].axis('off')
+        
+        # Individual mask channels
+        for i in range(6):
+            row = (i + 1) // 4
+            col = (i + 1) % 4
+            
+            # Create colored overlay
+            overlay = original_image.copy().astype(np.float32)
+            mask = resized_masks[i] > 0.5  # Threshold at 0.5
+            
+            if mask.any():
+                # Apply color where mask is positive
+                for c in range(3):
+                    overlay[:, :, c] = np.where(mask, 
+                                              overlay[:, :, c] * 0.6 + colors[i][c] * 0.4,
+                                              overlay[:, :, c])
+            
+            axes[row, col].imshow(overlay.astype(np.uint8))
+            axes[row, col].set_title(f'{labels[i]}\n({np.sum(mask)} pixels)')
+            axes[row, col].axis('off')
+        
+        # Combined overlay
+        combined_overlay = original_image.copy().astype(np.float32)
+        alpha = 0.4
+        
+        for i in range(6):
+            mask = resized_masks[i] > 0.5
+            if mask.any():
+                for c in range(3):
+                    combined_overlay[:, :, c] = np.where(mask,
+                                                       combined_overlay[:, :, c] * (1-alpha) + colors[i][c] * alpha,
+                                                       combined_overlay[:, :, c])
+        
+        axes[1, 3].imshow(combined_overlay.astype(np.uint8))
+        
+        # Add quality assessment text
+        quality_text = f"""Overall: {predictions['overall_quality']['quality']} ({predictions['overall_quality']['confidence']:.2f})
+Holes: {predictions['hole_quality']['quality']} ({predictions['hole_quality']['confidence']:.2f})
+Text: {predictions['text_quality']['quality']} ({predictions['text_quality']['confidence']:.2f})
+Knobs: {predictions['knob_quality']['quality']} ({predictions['knob_quality']['confidence']:.2f})
+Surface: {predictions['surface_quality']['quality']} ({predictions['surface_quality']['confidence']:.2f})"""
+        
+        axes[1, 3].text(0.02, 0.98, quality_text, transform=axes[1, 3].transAxes, 
+                        fontsize=10, verticalalignment='top',
+                        bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        axes[1, 3].set_title('Combined Prediction')
+        axes[1, 3].axis('off')
+        
+        plt.tight_layout()
+        
+        # Save visualization
+        if output_dir is None:
+            output_dir = Path(image_path).parent / 'predictions'
+        else:
+            output_dir = Path(output_dir)
+        
+        output_dir.mkdir(exist_ok=True)
+        
+        image_name = Path(image_path).stem
+        viz_path = output_dir / f'{image_name}_prediction.png'
+        
+        plt.savefig(viz_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        print(f"💾 Visualization saved: {viz_path}")
+        return str(viz_path)
     
     def predict_directory(self, image_dir):
         """Predict quality for all images in a directory"""
@@ -141,6 +264,10 @@ def main():
                        help='Path to save results JSON (optional)')
     parser.add_argument('--norm_stats', type=str, default='normalization_stats.json',
                        help='Normalization statistics file')
+    parser.add_argument('--visualize', action='store_true',
+                       help='Create visualization of predictions')
+    parser.add_argument('--viz_output_dir', type=str, default=None,
+                       help='Directory to save visualizations (default: same as image dir)')
     
     args = parser.parse_args()
     
@@ -155,7 +282,9 @@ def main():
     if args.image_path:
         # Single image
         print(f"\n🔍 Analyzing image: {args.image_path}")
-        results = inference.predict_single_image(args.image_path)
+        results = inference.predict_single_image(args.image_path, 
+                                                save_visualization=args.visualize,
+                                                output_dir=args.viz_output_dir)
         
         # Print results
         print(f"\n📊 RESULTS:")

@@ -76,6 +76,10 @@ class ComponentQualityDataset(Dataset):
                 with open(ann_file, 'r') as f:
                     ann = json.load(f)
                 
+                # Validate annotation completeness
+                if not self._validate_annotation(ann, ann_file.name):
+                    continue
+                
                 # Add file paths
                 ann['annotation_file'] = str(ann_file)
                 ann['image_file'] = str(image_file)
@@ -104,6 +108,71 @@ class ComponentQualityDataset(Dataset):
             selected_indices = indices[split_idx:]
         
         return [valid_annotations[i] for i in selected_indices]
+
+    def _validate_annotation(self, ann, filename):
+        """Validate that annotation has required fields and is not empty"""
+        
+        # Check if annotation is completely empty
+        if not ann or len(ann) == 0:
+            print(f"   ⚠️  Empty annotation: {filename}")
+            return False
+        
+        # Essential fields that should exist
+        required_checks = []
+        warnings = []
+        
+        # Check hole annotations
+        hole_polygons = ann.get('hole_polygons', [])
+        hole_qualities = ann.get('hole_qualities', [])
+        
+        if not hole_polygons:
+            warnings.append("No hole polygons")
+        elif len(hole_polygons) != len(hole_qualities):
+            warnings.append(f"Hole count mismatch: {len(hole_polygons)} polygons vs {len(hole_qualities)} qualities")
+        else:
+            # Check if hole polygons are valid
+            valid_holes = 0
+            for i, polygon in enumerate(hole_polygons):
+                if isinstance(polygon, list) and len(polygon) >= 3:
+                    valid_holes += 1
+            if valid_holes == 0:
+                warnings.append("No valid hole polygons")
+        
+        # Check text annotation
+        if not ann.get('text_polygon'):
+            warnings.append("Missing text_polygon")
+        
+        # Check knob annotations
+        if not ann.get('plus_knob_polygon'):
+            warnings.append("Missing plus_knob_polygon")
+        if not ann.get('minus_knob_polygon'):
+            warnings.append("Missing minus_knob_polygon")
+        
+        # Check quality labels
+        quality_fields = ['hole_quality', 'text_quality', 'knob_quality', 'surface_quality', 'overall_quality']
+        missing_qualities = [field for field in quality_fields if field not in ann]
+        if missing_qualities:
+            warnings.append(f"Missing quality labels: {missing_qualities}")
+        
+        # Count how many critical components are missing
+        critical_missing = 0
+        if not hole_polygons:
+            critical_missing += 1
+        if not ann.get('text_polygon'):
+            critical_missing += 1
+        if not ann.get('plus_knob_polygon') or not ann.get('minus_knob_polygon'):
+            critical_missing += 1
+        
+        # Reject if too many critical components missing
+        if critical_missing >= 2:
+            print(f"   ❌ Rejected {filename}: Too many missing components ({', '.join(warnings)})")
+            return False
+        
+        # Accept but warn about minor issues
+        if warnings:
+            print(f"   ⚠️  {filename}: {', '.join(warnings[:2])}{'...' if len(warnings) > 2 else ''}")
+        
+        return True
 
     def __len__(self):
         return len(self.annotations)
