@@ -138,9 +138,18 @@ class ComponentQualityDataset(Dataset):
         return -1  # Default to unknown
     
     def create_masks(self, ann, h, w):
-        """Create segmentation masks for different components"""
+        """Create segmentation masks for different components
+        
+        Creates 6-channel mask from 4 polygon types in JSON:
+        - hole_polygons → 3 channels (separated by quality: good/deformed/blocked)
+        - text_polygon → 1 channel
+        - plus_knob_polygon → 1 channel  
+        - minus_knob_polygon → 1 channel
+        Total: 6 channels
+        """
         masks = np.zeros((h, w, 6), dtype=np.float32)
         
+        # HOLE MASKS (3 channels based on quality)
         # Channel 0: Good holes
         # Channel 1: Deformed holes  
         # Channel 2: Blocked holes
@@ -153,22 +162,33 @@ class ComponentQualityDataset(Dataset):
                 # Get quality for this hole
                 quality = hole_qualities[i] if i < len(hole_qualities) else 'good'
                 channel = {"good": 0, "deformed": 1, "blocked": 2}.get(quality, 0)
-                cv2.fillPoly(masks[:, :, channel], [points], 1)
+                
+                # Fix: Create contiguous array for OpenCV
+                channel_mask = np.ascontiguousarray(masks[:, :, channel])
+                cv2.fillPoly(channel_mask, [points], 1)
+                masks[:, :, channel] = channel_mask
         
+        # KNOB AND TEXT MASKS (1 channel each)
         # Channel 3: Text region
         if ann.get('text_polygon'):
             points = np.array(ann['text_polygon'], dtype=np.int32)
-            cv2.fillPoly(masks[:, :, 3], [points], 1)
+            channel_mask = np.ascontiguousarray(masks[:, :, 3])
+            cv2.fillPoly(channel_mask, [points], 1)
+            masks[:, :, 3] = channel_mask
         
         # Channel 4: Plus knob
         if ann.get('plus_knob_polygon'):
             points = np.array(ann['plus_knob_polygon'], dtype=np.int32)
-            cv2.fillPoly(masks[:, :, 4], [points], 1)
+            channel_mask = np.ascontiguousarray(masks[:, :, 4])
+            cv2.fillPoly(channel_mask, [points], 1)
+            masks[:, :, 4] = channel_mask
         
         # Channel 5: Minus knob
         if ann.get('minus_knob_polygon'):
             points = np.array(ann['minus_knob_polygon'], dtype=np.int32)
-            cv2.fillPoly(masks[:, :, 5], [points], 1)
+            channel_mask = np.ascontiguousarray(masks[:, :, 5])
+            cv2.fillPoly(channel_mask, [points], 1)
+            masks[:, :, 5] = channel_mask
         
         return masks
     
@@ -245,6 +265,9 @@ class ComponentQualityDataset(Dataset):
 def get_training_augmentations():
     """Get augmentations for training"""
     return A.Compose([
+        # Resize preserving aspect ratio (1920x1080 -> 960x544, exactly 1/2 scale)
+        A.Resize(544, 960),
+        
         # Geometric transforms (mild to preserve polygon shapes)
         A.ShiftScaleRotate(
             shift_limit=0.05,
@@ -276,14 +299,16 @@ def get_training_augmentations():
             A.GaussianBlur(blur_limit=(3, 5)),
         ], p=0.1),
         
-        # Normalize
-        A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        # Normalize with battery-specific values (computed from dataset)
+        A.Normalize(mean=[0.4045, 0.4045, 0.4045], std=[0.2256, 0.2254, 0.2782]),
         ToTensorV2()
     ])
 
 def get_validation_augmentations():
     """Get augmentations for validation"""
     return A.Compose([
-        A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        # Resize preserving aspect ratio (1920x1080 -> 960x544, exactly 1/2 scale)
+        A.Resize(544, 960),
+        A.Normalize(mean=[0.4045, 0.4045, 0.4045], std=[0.2256, 0.2254, 0.2782]),
         ToTensorV2()
     ]) 

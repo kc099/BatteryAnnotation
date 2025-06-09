@@ -1,41 +1,40 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.models import efficientnet_b4
+from torchvision.models import resnet50
+from torchvision.models.segmentation import deeplabv3_resnet50
 
 class HierarchicalQualityModel(nn.Module):
-    """Model with separate quality assessment heads for each component"""
+    """DeepLabV3+ based model with segmentation and classification heads"""
     
-    def __init__(self, num_seg_classes=6, num_features=12):
+    def __init__(self, num_seg_classes=6, num_features=12, input_size=512):
         super().__init__()
         
-        # Backbone - EfficientNet for better efficiency
-        self.backbone = efficientnet_b4(pretrained=True)
-        backbone_out_channels = 1792
+        # DeepLabV3+ backbone with ResNet50
+        self.backbone = deeplabv3_resnet50(pretrained=True, progress=True)
         
-        # Remove the classifier head
-        self.backbone.classifier = nn.Identity()
+        # Keep the original classifier for ASPP features
+        # We'll just use the ASPP output, not the final classification
         
-        # Segmentation decoder
-        self.seg_decoder = nn.Sequential(
-            nn.ConvTranspose2d(backbone_out_channels, 512, 2, stride=2),
-            nn.BatchNorm2d(512),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(512, 256, 2, stride=2),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(256, 128, 2, stride=2),
+        # Get backbone feature dimensions
+        backbone_out_channels = 2048  # ResNet50 final layer
+        
+        # Custom segmentation head (replace the original)
+        self.seg_head = nn.Sequential(
+            nn.Conv2d(256, 128, 3, padding=1),  # DeepLabV3+ outputs 256 channels
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(128, 64, 2, stride=2),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, num_seg_classes, 1)
+            nn.Dropout2d(0.1),
+            nn.Conv2d(128, num_seg_classes, 1)
         )
         
+        # Global feature extractor for classification
+        self.global_pool = nn.AdaptiveAvgPool2d(1)
+        
         # Feature processor combining CNN and hand-crafted features
+        # Use 256 channels from DeepLabV3+ output
         self.feature_processor = nn.Sequential(
-            nn.Linear(backbone_out_channels + num_features, 512),
+            nn.Linear(256 + num_features, 512),  # 256 from global pooled features
             nn.BatchNorm1d(512),
             nn.ReLU(),
             nn.Dropout(0.3),
@@ -63,14 +62,8 @@ class HierarchicalQualityModel(nn.Module):
             nn.Sigmoid()
         )
         
-        # Attention mechanism for focusing on important regions
-        self.spatial_attention = nn.Sequential(
-            nn.Conv2d(backbone_out_channels, backbone_out_channels // 8, 1),
-            nn.BatchNorm2d(backbone_out_channels // 8),
-            nn.ReLU(),
-            nn.Conv2d(backbone_out_channels // 8, 1, 1),
-            nn.Sigmoid()
-        )
+        # Store input size for proper resizing
+        self.input_size = input_size
     
     def _make_quality_head(self, in_features, component_name):
         """Create a quality assessment head for a specific component"""
@@ -86,30 +79,34 @@ class HierarchicalQualityModel(nn.Module):
         )
     
     def forward(self, x, features=None):
-        # Extract features using backbone
-        # EfficientNet returns features at different scales
-        backbone_features = self.backbone.features(x)
+        batch_size = x.shape[0]
+        original_size = x.shape[-2:]
         
-        # Apply spatial attention
-        attention_map = self.spatial_attention(backbone_features)
-        attended_features = backbone_features * attention_map
+        # Use DeepLabV3+ features directly
+        # Get backbone features
+        backbone_features = self.backbone.backbone(x)
+        x_feat = backbone_features['out']  # High-level features from ResNet50
         
-        # Global average pooling for classification
-        global_features = F.adaptive_avg_pool2d(attended_features, 1).flatten(1)
+        # Get ASPP features using the pre-trained ASPP module
+        aspp_features = self.backbone.classifier[0](x_feat)  # ASPP output (256 channels)
         
-        # Get backbone output (already includes global pooling)
-        backbone_out = F.adaptive_avg_pool2d(backbone_features, 1).flatten(1)
+        # Custom segmentation head (replaces the final 1x1 conv of DeepLabV3+)
+        seg_output = self.seg_head(aspp_features)
         
-        # Segmentation output
-        seg_output = self.seg_decoder(backbone_features)
+        # Upsample segmentation to input size
+        seg_output = F.interpolate(seg_output, size=original_size, 
+                                 mode='bilinear', align_corners=False)
+        
+        # Classification branch - global pooling from ASPP features
+        global_features = self.global_pool(aspp_features).flatten(1)
         
         # Combine CNN features with hand-crafted features
         if features is not None:
-            combined_features = torch.cat([backbone_out, features], dim=1)
+            combined_features = torch.cat([global_features, features], dim=1)
         else:
             # Create dummy features if none provided
-            dummy_features = torch.zeros(backbone_out.shape[0], 12, device=backbone_out.device)
-            combined_features = torch.cat([backbone_out, dummy_features], dim=1)
+            dummy_features = torch.zeros(batch_size, 12, device=global_features.device)
+            combined_features = torch.cat([global_features, dummy_features], dim=1)
         
         # Process combined features
         processed_features = self.feature_processor(combined_features)
@@ -136,8 +133,8 @@ class HierarchicalQualityModel(nn.Module):
             'surface_quality': surface_quality,
             'overall_quality': overall_quality,
             'component_qualities': component_qualities,
-            'attention_map': attention_map,
-            'features': processed_features
+            'features': processed_features,
+            'seg_features': aspp_features  # For visualization
         }
 
 class ComponentAwareLoss(nn.Module):
@@ -160,13 +157,21 @@ class ComponentAwareLoss(nn.Module):
         
         # Segmentation loss (multi-channel binary)
         seg_loss = 0
-        for c in range(predictions['segmentation'].shape[1]):
+        seg_pred = predictions['segmentation']
+        seg_target = targets['masks']
+        
+        # Ensure spatial dimensions match
+        if seg_pred.shape[-2:] != seg_target.shape[-2:]:
+            seg_target = F.interpolate(seg_target, size=seg_pred.shape[-2:], 
+                                     mode='bilinear', align_corners=False)
+        
+        for c in range(seg_pred.shape[1]):
             channel_loss = self.seg_criterion(
-                predictions['segmentation'][:, c], 
-                targets['masks'][:, c]
+                seg_pred[:, c], 
+                seg_target[:, c]
             )
             seg_loss += channel_loss.mean()
-        losses['seg_loss'] = seg_loss / predictions['segmentation'].shape[1]
+        losses['seg_loss'] = seg_loss / seg_pred.shape[1]
         
         # Component quality losses (only for labeled samples)
         component_losses = []
@@ -176,8 +181,8 @@ class ComponentAwareLoss(nn.Module):
             target_key = f'{component}_quality'
             
             # Get predictions and targets
-            preds = predictions[pred_key].squeeze()
-            targets_comp = targets[target_key]
+            preds = predictions[pred_key].flatten()  # Use flatten instead of squeeze
+            targets_comp = targets[target_key].flatten()  # Ensure same shape
             
             # Create mask for valid labels (not -1)
             valid_mask = targets_comp >= 0
@@ -186,7 +191,7 @@ class ComponentAwareLoss(nn.Module):
                 # Calculate loss only for valid labels
                 valid_preds = preds[valid_mask]
                 valid_targets = targets_comp[valid_mask]
-                valid_weights = targets['weight'][valid_mask]
+                valid_weights = targets['weight'].flatten()[valid_mask]
                 
                 loss = self.quality_criterion(valid_preds, valid_targets)
                 weighted_loss = (loss * valid_weights).mean()
@@ -201,14 +206,14 @@ class ComponentAwareLoss(nn.Module):
             losses['component_loss'] = torch.tensor(0.0, device=predictions['hole_quality'].device)
         
         # Overall quality loss
-        overall_preds = predictions['overall_quality'].squeeze()
-        overall_targets = targets['overall_quality']
+        overall_preds = predictions['overall_quality'].flatten()  # Use flatten instead of squeeze
+        overall_targets = targets['overall_quality'].flatten()  # Ensure same shape
         overall_valid_mask = overall_targets >= 0
         
         if overall_valid_mask.sum() > 0:
             valid_overall_preds = overall_preds[overall_valid_mask]
             valid_overall_targets = overall_targets[overall_valid_mask]
-            valid_overall_weights = targets['weight'][overall_valid_mask]
+            valid_overall_weights = targets['weight'].flatten()[overall_valid_mask]
             
             overall_loss = self.quality_criterion(valid_overall_preds, valid_overall_targets)
             losses['overall_loss'] = (overall_loss * valid_overall_weights).mean()

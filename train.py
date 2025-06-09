@@ -202,18 +202,32 @@ def train_hierarchical_model(data_config):
     
     callbacks.append(ComponentMonitor())
     
-    # Trainer
+    # GPU Configuration
+    accelerator = 'gpu' if torch.cuda.is_available() else 'cpu'
+    devices = 1 if torch.cuda.is_available() else 'auto'
+    
+    if torch.cuda.is_available():
+        print(f"🚀 Using GPU: {torch.cuda.get_device_name()}")
+        print(f"   GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+    else:
+        print("⚠️  GPU not available, using CPU")
+    
+    # Trainer with enhanced GPU settings
     trainer = pl.Trainer(
         max_epochs=data_config.get('epochs', 100),
-        accelerator='gpu' if torch.cuda.is_available() else 'cpu',
-        devices=1,
-        precision=16,  # Mixed precision training
+        accelerator=accelerator,
+        devices=devices,
+        precision='16-mixed' if torch.cuda.is_available() else 32,  # Mixed precision for GPU
         callbacks=callbacks,
         gradient_clip_val=1.0,
         accumulate_grad_batches=data_config.get('accumulate_grad_batches', 4),
         val_check_interval=0.5,
         log_every_n_steps=10,
-        enable_model_summary=True
+        enable_model_summary=True,
+        # Additional GPU optimizations
+        benchmark=True if torch.cuda.is_available() else False,  # Optimize for consistent input sizes
+        deterministic=False,  # Allow non-deterministic operations for speed
+        sync_batchnorm=True if torch.cuda.is_available() else False
     )
     
     # Train
