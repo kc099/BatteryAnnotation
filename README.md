@@ -12,16 +12,28 @@ A robust deep learning pipeline for automated battery cover quality inspection u
 
 ## 🚀 **Quick Start**
 
-### 1. **Training**
+### 1. **Compute Dataset Normalization** (for new datasets)
 ```bash
-# Train model on your data
-python train.py --data_dir ../extracted_frames_9182 --epochs 100 --batch_size 8
+# Compute normalization stats from multiple directories  
+python compute_normalization.py --data_dirs ../extracted_frames_9182 ../extracted_frames_9183 ../extracted_frames_9198
+
+# For faster computation (sample subset)
+python compute_normalization.py --data_dirs ../extracted_frames_9182 --sample_size 500
+```
+
+### 2. **Training**
+```bash
+# Train on multiple directories
+python train.py --data_dirs ../extracted_frames_9182 ../extracted_frames_9183 ../extracted_frames_9198 --epochs 100
+
+# Train on single directory  
+python train.py --data_dirs ../extracted_frames_9182 --epochs 100 --batch_size 8
 
 # Monitor training
 tensorboard --logdir logs/
 ```
 
-### 2. **Inference**
+### 3. **Inference**
 ```bash
 # Single image
 python inference.py --model_path best_model.ckpt --image_path test_image.jpg
@@ -32,7 +44,7 @@ python inference.py --model_path best_model.ckpt --image_dir test_images/ --outp
 
 ## 📂 **Data Structure**
 
-The pipeline automatically discovers and processes data from a directory containing:
+The pipeline automatically discovers and processes data from **multiple directories** containing:
 ```
 extracted_frames_9182/
 ├── frame_000000.jpg
@@ -40,10 +52,22 @@ extracted_frames_9182/
 ├── frame_000001.jpg  
 ├── frame_000001_enhanced_annotation.json
 └── ...
+
+extracted_frames_9183/  
+├── frame_000000.jpg
+├── frame_000000_enhanced_annotation.json
+└── ...
+
+extracted_frames_9198/
+├── frame_000000.jpg  
+├── frame_000000_enhanced_annotation.json
+└── ...
 ```
 
 **No manual file creation needed** - the dataset automatically:
+- Discovers data across multiple directories
 - Matches images with annotations by filename
+- Handles same filenames in different directories  
 - Splits into train/validation (80/20)
 - Filters by confidence score (>0.7)
 - Creates consistent splits with random seed
@@ -111,19 +135,26 @@ See `requirements.txt` for complete dependencies:
 ## 🎛️ **Advanced Usage**
 
 ```bash
-# Custom training parameters
+# Custom training parameters with multiple directories
 python train.py \
-    --data_dir /path/to/data \
+    --data_dirs ../dir1 ../dir2 ../dir3 \
     --epochs 200 \
     --batch_size 16 \
     --learning_rate 2e-4 \
-    --num_workers 8
+    --num_workers 8 \
+    --norm_stats custom_normalization.json
 
-# Batch inference with results export
+# Compute normalization for new dataset
+python compute_normalization.py \
+    --data_dirs /path/to/data1 /path/to/data2 \
+    --sample_size 1000
+
+# Batch inference with custom normalization
 python inference.py \
     --model_path best_model.ckpt \
     --image_dir production_images/ \
-    --output_path inspection_results.json
+    --output_path inspection_results.json \
+    --norm_stats custom_normalization.json
 ```
 
 ## 🏆 **Key Features**

@@ -14,16 +14,20 @@ from pathlib import Path
 class ComponentQualityDataset(Dataset):
     """Dataset with separate quality labels for each component"""
     
-    def __init__(self, data_dir, split='train', train_ratio=0.8, transform=None, seed=42):
+    def __init__(self, data_dirs, split='train', train_ratio=0.8, transform=None, seed=42):
         """
         Args:
-            data_dir: Directory containing images and annotation files (e.g., extracted_frames_9182)
+            data_dirs: List of directories or single directory containing images and annotation files 
+                      (e.g., ['../extracted_frames_9182', '../extracted_frames_9183'])
             split: 'train' or 'val'  
             train_ratio: Fraction of data for training
             transform: Data augmentation pipeline
             seed: Random seed for consistent splits
         """
-        self.data_dir = Path(data_dir)
+        # Handle both single directory and list of directories
+        if isinstance(data_dirs, (str, Path)):
+            data_dirs = [data_dirs]
+        self.data_dirs = [Path(d) for d in data_dirs]
         self.split = split
         self.transform = transform
         
@@ -41,15 +45,21 @@ class ComponentQualityDataset(Dataset):
         
     def _discover_and_split_data(self, train_ratio, seed):
         """Auto-discover annotation files and split train/val"""
-        print(f"🔍 Discovering data in {self.data_dir}")
+        print(f"🔍 Discovering data in {len(self.data_dirs)} directories:")
+        for data_dir in self.data_dirs:
+            print(f"   - {data_dir}")
         
-        # Find all annotation files
-        annotation_files = list(self.data_dir.glob("*_enhanced_annotation.json"))
+        # Find all annotation files across all directories
+        annotation_files = []
+        for data_dir in self.data_dirs:
+            dir_files = list(data_dir.glob("*_enhanced_annotation.json"))
+            annotation_files.extend(dir_files)
+            print(f"   Found {len(dir_files)} annotation files in {data_dir.name}")
         
         if not annotation_files:
-            raise ValueError(f"No annotation files found in {self.data_dir}")
+            raise ValueError(f"No annotation files found in any directory!")
         
-        print(f"   Found {len(annotation_files)} annotation files")
+        print(f"   Total: {len(annotation_files)} annotation files")
         
         # Load and validate annotations
         valid_annotations = []
@@ -302,8 +312,32 @@ class ComponentQualityDataset(Dataset):
         
         return torch.tensor(features, dtype=torch.float32)
 
-def get_training_augmentations():
+def load_normalization_stats(stats_file='normalization_stats.json'):
+    """Load normalization statistics from file or use defaults"""
+    try:
+        import json
+        with open(stats_file, 'r') as f:
+            stats = json.load(f)
+        mean = stats['mean']
+        std = stats['std']
+        print(f"📊 Loaded normalization stats from {stats_file}")
+        print(f"   Mean: {mean}")
+        print(f"   Std: {std}")
+        return mean, std
+    except FileNotFoundError:
+        # Use previously computed values as defaults
+        mean = [0.4045, 0.4045, 0.4045]
+        std = [0.2256, 0.2254, 0.2782]
+        print(f"⚠️  No {stats_file} found, using default normalization values")
+        print(f"   Mean: {mean}")
+        print(f"   Std: {std}")
+        print(f"   💡 Run: python compute_normalization.py --data_dirs ../extracted_frames_9182 ../extracted_frames_9183 ../extracted_frames_9198")
+        return mean, std
+
+def get_training_augmentations(norm_stats_file='normalization_stats.json'):
     """Get augmentations for training"""
+    mean, std = load_normalization_stats(norm_stats_file)
+    
     return A.Compose([
         # Resize preserving aspect ratio (1920x1080 -> 960x544, exactly 1/2 scale)
         A.Resize(544, 960),
@@ -339,16 +373,18 @@ def get_training_augmentations():
             A.GaussianBlur(blur_limit=(3, 5)),
         ], p=0.1),
         
-        # Normalize with battery-specific values (computed from dataset)
-        A.Normalize(mean=[0.4045, 0.4045, 0.4045], std=[0.2256, 0.2254, 0.2782]),
+        # Normalize with dataset-specific values
+        A.Normalize(mean=mean, std=std),
         ToTensorV2()
     ])
 
-def get_validation_augmentations():
+def get_validation_augmentations(norm_stats_file='normalization_stats.json'):
     """Get augmentations for validation"""
+    mean, std = load_normalization_stats(norm_stats_file)
+    
     return A.Compose([
         # Resize preserving aspect ratio (1920x1080 -> 960x544, exactly 1/2 scale)
         A.Resize(544, 960),
-        A.Normalize(mean=[0.4045, 0.4045, 0.4045], std=[0.2256, 0.2254, 0.2782]),
+        A.Normalize(mean=mean, std=std),
         ToTensorV2()
     ]) 

@@ -99,7 +99,7 @@ class BatteryQualityTrainer(pl.LightningModule):
         }
 
 
-def train_model(data_dir, epochs=100, batch_size=8, learning_rate=1e-4, num_workers=4):
+def train_model(data_dirs, epochs=100, batch_size=8, learning_rate=1e-4, num_workers=4, norm_stats='normalization_stats.json'):
     """Train the battery quality model"""
     
     print("🔋 BATTERY QUALITY TRAINING PIPELINE")
@@ -108,17 +108,17 @@ def train_model(data_dir, epochs=100, batch_size=8, learning_rate=1e-4, num_work
     # Create datasets
     print("📂 Creating datasets...")
     train_dataset = ComponentQualityDataset(
-        data_dir=data_dir,
+        data_dirs=data_dirs,
         split='train',
         train_ratio=0.8,
-        transform=get_training_augmentations()
+        transform=get_training_augmentations(norm_stats)
     )
     
     val_dataset = ComponentQualityDataset(
-        data_dir=data_dir,
+        data_dirs=data_dirs,
         split='val', 
         train_ratio=0.8,
-        transform=get_validation_augmentations()
+        transform=get_validation_augmentations(norm_stats)
     )
     
     # Create dataloaders
@@ -195,8 +195,8 @@ def train_model(data_dir, epochs=100, batch_size=8, learning_rate=1e-4, num_work
 
 def main():
     parser = argparse.ArgumentParser(description='Train Battery Quality Assessment Model')
-    parser.add_argument('--data_dir', type=str, required=True, 
-                       help='Directory containing images and annotations (e.g., extracted_frames_9182)')
+    parser.add_argument('--data_dirs', nargs='+', required=True, 
+                       help='Directories containing images and annotations (e.g., ../extracted_frames_9182 ../extracted_frames_9183)')
     parser.add_argument('--epochs', type=int, default=100,
                        help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=8,
@@ -205,21 +205,25 @@ def main():
                        help='Learning rate')
     parser.add_argument('--num_workers', type=int, default=4,
                        help='Number of data loading workers')
+    parser.add_argument('--norm_stats', type=str, default='normalization_stats.json',
+                       help='Normalization statistics file')
     
     args = parser.parse_args()
     
-    # Validate data directory
-    data_path = Path(args.data_dir)
-    if not data_path.exists():
-        raise ValueError(f"Data directory does not exist: {data_path}")
+    # Validate data directories
+    data_paths = [Path(d) for d in args.data_dirs]
+    for data_path in data_paths:
+        if not data_path.exists():
+            raise ValueError(f"Data directory does not exist: {data_path}")
     
     # Train model
     best_model_path = train_model(
-        data_dir=data_path,
+        data_dirs=data_paths,
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
-        num_workers=args.num_workers
+        num_workers=args.num_workers,
+        norm_stats=args.norm_stats
     )
     
     print(f"\n🎉 Training pipeline completed successfully!")

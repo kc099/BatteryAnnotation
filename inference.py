@@ -22,7 +22,7 @@ from train import BatteryQualityTrainer
 class BatteryQualityInference:
     """Simple inference engine for battery quality assessment"""
     
-    def __init__(self, model_path):
+    def __init__(self, model_path, norm_stats_file='normalization_stats.json'):
         """Load trained model"""
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
@@ -31,8 +31,8 @@ class BatteryQualityInference:
         self.model.eval()
         self.model.to(self.device)
         
-        # Load transforms
-        self.transform = get_validation_augmentations()
+        # Load transforms with proper normalization
+        self.transform = get_validation_augmentations(norm_stats_file)
         
         print(f"✅ Model loaded from {model_path}")
         print(f"🖥️  Using device: {self.device}")
@@ -139,6 +139,8 @@ def main():
     
     parser.add_argument('--output_path', type=str,
                        help='Path to save results JSON (optional)')
+    parser.add_argument('--norm_stats', type=str, default='normalization_stats.json',
+                       help='Normalization statistics file')
     
     args = parser.parse_args()
     
@@ -147,7 +149,7 @@ def main():
         raise ValueError(f"Model file does not exist: {args.model_path}")
     
     # Create inference engine
-    inference = BatteryQualityInference(args.model_path)
+    inference = BatteryQualityInference(args.model_path, args.norm_stats)
     
     # Run predictions
     if args.image_path:
