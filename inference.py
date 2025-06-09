@@ -1,166 +1,204 @@
+#!/usr/bin/env python3
+"""
+Battery Quality Inference
+
+Usage:
+    python inference.py --model_path best_model.ckpt --image_path test_image.jpg
+    python inference.py --model_path best_model.ckpt --image_dir test_images/
+"""
+
+import argparse
 import torch
 import cv2
 import numpy as np
 from pathlib import Path
+import json
 
-from .model import HierarchicalQualityModel
-from .dataset import get_validation_augmentations
+from model import HierarchicalQualityModel
+from dataset import get_validation_augmentations
+from train import BatteryQualityTrainer
 
-class QualityInference:
-    """Inference class for the hierarchical quality model"""
+
+class BatteryQualityInference:
+    """Simple inference engine for battery quality assessment"""
     
-    def __init__(self, checkpoint_path, device='cuda'):
-        self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
+    def __init__(self, model_path):
+        """Load trained model"""
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
-        # Load model
-        self.model = HierarchicalQualityModel()
-        
-        # Handle different checkpoint formats
-        if isinstance(checkpoint_path, (str, Path)):
-            checkpoint = torch.load(checkpoint_path, map_location=self.device)
-            
-            # Handle PyTorch Lightning checkpoint format
-            if 'state_dict' in checkpoint:
-                # Remove 'model.' prefix from keys if present
-                state_dict = {}
-                for key, value in checkpoint['state_dict'].items():
-                    if key.startswith('model.'):
-                        state_dict[key[6:]] = value  # Remove 'model.' prefix
-                    else:
-                        state_dict[key] = value
-                self.model.load_state_dict(state_dict)
-            else:
-                # Regular PyTorch checkpoint
-                self.model.load_state_dict(checkpoint)
-        else:
-            # Direct model passed
-            self.model = checkpoint_path
-            
-        self.model.to(self.device)
+        # Load model from checkpoint
+        self.model = BatteryQualityTrainer.load_from_checkpoint(model_path)
         self.model.eval()
+        self.model.to(self.device)
         
+        # Load transforms
         self.transform = get_validation_augmentations()
+        
+        print(f"✅ Model loaded from {model_path}")
+        print(f"🖥️  Using device: {self.device}")
     
-    def predict(self, image_path, visualize=True):
+    def predict_single_image(self, image_path):
         """Predict quality for a single image"""
-        # Load image
-        if isinstance(image_path, (str, Path)):
-            image = cv2.imread(str(image_path))
-            if image is None:
-                raise ValueError(f"Could not load image: {image_path}")
-        else:
-            # Assume it's already an image array
-            image = image_path
-            
+        
+        # Load and preprocess image
+        image = cv2.imread(str(image_path))
+        if image is None:
+            raise ValueError(f"Could not load image: {image_path}")
+        
         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        h, w = image.shape[:2]
+        h, w = image_rgb.shape[:2]
         
-        # Transform
-        transformed = self.transform(image=image_rgb)
-        img_tensor = transformed['image'].unsqueeze(0).to(self.device)
+        # Create dummy masks for transform (not used in inference)
+        dummy_masks = np.zeros((h, w, 6), dtype=np.float32)
         
-        # Create dummy features (in real scenario, extract from image)
-        dummy_features = torch.zeros(1, 12).to(self.device)
+        # Apply transforms
+        transformed = self.transform(image=image_rgb, mask=dummy_masks)
+        input_tensor = transformed['image'].unsqueeze(0).to(self.device)
         
-        # Predict
+        # Create dummy features (zeros - model will handle this)
+        dummy_features = torch.zeros(1, 12, device=self.device)
+        
+        # Run inference
         with torch.no_grad():
-            outputs = self.model(img_tensor, dummy_features)
+            outputs = self.model(input_tensor, dummy_features)
         
-        # Process outputs
-        results = {
-            'hole_quality': 'GOOD' if outputs['hole_quality'].item() > 0.5 else 'BAD',
-            'hole_quality_score': outputs['hole_quality'].item(),
-            'text_quality': 'GOOD' if outputs['text_quality'].item() > 0.5 else 'BAD',
-            'text_quality_score': outputs['text_quality'].item(),
-            'knob_quality': 'GOOD' if outputs['knob_quality'].item() > 0.5 else 'BAD',
-            'knob_quality_score': outputs['knob_quality'].item(),
-            'surface_quality': 'GOOD' if outputs['surface_quality'].item() > 0.5 else 'BAD',
-            'surface_quality_score': outputs['surface_quality'].item(),
-            'overall_quality': 'GOOD' if outputs['overall_quality'].item() > 0.5 else 'BAD',
-            'overall_quality_score': outputs['overall_quality'].item(),
+        # Extract predictions
+        predictions = {
+            'hole_quality': self._get_quality_prediction(outputs['hole_quality']),
+            'text_quality': self._get_quality_prediction(outputs['text_quality']),
+            'knob_quality': self._get_quality_prediction(outputs['knob_quality']),
+            'surface_quality': self._get_quality_prediction(outputs['surface_quality']),
+            'overall_quality': self._get_quality_prediction(outputs['overall_quality']),
         }
         
-        # Get segmentation masks
-        seg_masks = torch.sigmoid(outputs['segmentation']).squeeze().cpu().numpy()
+        # Add segmentation info
+        seg_probs = torch.sigmoid(outputs['segmentation']).squeeze().cpu().numpy()
+        predictions['segmentation'] = {
+            'good_holes_pixels': int((seg_probs[0] > 0.5).sum()),
+            'deformed_holes_pixels': int((seg_probs[1] > 0.5).sum()),
+            'blocked_holes_pixels': int((seg_probs[2] > 0.5).sum()),
+            'text_pixels': int((seg_probs[3] > 0.5).sum()),
+            'plus_knob_pixels': int((seg_probs[4] > 0.5).sum()),
+            'minus_knob_pixels': int((seg_probs[5] > 0.5).sum()),
+        }
         
-        if visualize:
-            self.visualize_results(image, results, seg_masks)
-        
-        return results, seg_masks
+        return predictions
     
-    def predict_batch(self, image_paths, batch_size=8):
-        """Predict quality for multiple images"""
-        results = []
-        masks = []
-        
-        for i in range(0, len(image_paths), batch_size):
-            batch_paths = image_paths[i:i+batch_size]
-            batch_results = []
-            batch_masks = []
-            
-            for path in batch_paths:
-                result, mask = self.predict(path, visualize=False)
-                batch_results.append(result)
-                batch_masks.append(mask)
-            
-            results.extend(batch_results)
-            masks.extend(batch_masks)
-        
-        return results, masks
+    def _get_quality_prediction(self, quality_tensor):
+        """Convert quality tensor to readable prediction"""
+        # Apply sigmoid since model outputs logits
+        prob = torch.sigmoid(quality_tensor).squeeze().cpu().item()
+        quality = "GOOD" if prob > 0.5 else "BAD"
+        return {
+            'quality': quality,
+            'confidence': float(prob),
+            'raw_score': float(prob)
+        }
     
-    def visualize_results(self, image, results, seg_masks):
-        """Visualize prediction results"""
-        try:
-            import matplotlib.pyplot as plt
-            
-            fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-            
-            # Original image
-            axes[0, 0].imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-            axes[0, 0].set_title('Original Image')
-            axes[0, 0].axis('off')
-            
-            # Segmentation masks
-            mask_titles = ['Good Holes', 'Deformed Holes', 'Blocked Holes', 
-                          'Text Region', 'Plus Knob', 'Minus Knob']
-            
-            for i, (mask, title) in enumerate(zip(seg_masks, mask_titles)):
-                row = (i + 1) // 3
-                col = (i + 1) % 3
-                axes[row, col].imshow(mask, cmap='hot')
-                axes[row, col].set_title(title)
-                axes[row, col].axis('off')
-            
-            # Add quality scores as text
-            quality_text = "Quality Assessment:\n\n"
-            for component in ['hole', 'text', 'knob', 'surface', 'overall']:
-                quality = results[f'{component}_quality']
-                score = results[f'{component}_quality_score']
-                emoji = "✅" if quality == "GOOD" else "❌"
-                quality_text += f"{component.title()}: {emoji} {quality} ({score:.1%})\n"
-            
-            plt.figtext(0.02, 0.5, quality_text, fontsize=12, 
-                       bbox=dict(boxstyle="round,pad=0.5", facecolor="lightgray"))
-            
-            plt.tight_layout()
-            plt.show()
-            
-        except ImportError:
-            print("Matplotlib not available for visualization")
-            print("Quality Assessment Results:")
-            for component in ['hole', 'text', 'knob', 'surface', 'overall']:
-                quality = results[f'{component}_quality']
-                score = results[f'{component}_quality_score']
-                print(f"  {component.title()}: {quality} ({score:.1%})")
+    def predict_directory(self, image_dir):
+        """Predict quality for all images in a directory"""
+        image_dir = Path(image_dir)
+        
+        # Find all image files
+        image_extensions = ['.jpg', '.jpeg', '.png', '.bmp']
+        image_files = []
+        for ext in image_extensions:
+            image_files.extend(image_dir.glob(f'*{ext}'))
+            image_files.extend(image_dir.glob(f'*{ext.upper()}'))
+        
+        if not image_files:
+            print(f"No image files found in {image_dir}")
+            return {}
+        
+        print(f"🔍 Found {len(image_files)} images")
+        
+        results = {}
+        for image_file in image_files:
+            try:
+                print(f"   Processing {image_file.name}...")
+                predictions = self.predict_single_image(image_file)
+                results[str(image_file)] = predictions
+            except Exception as e:
+                print(f"   ❌ Error processing {image_file.name}: {e}")
+                results[str(image_file)] = {'error': str(e)}
+        
+        return results
 
-def load_model_for_inference(checkpoint_path, device='auto'):
-    """Convenience function to load model for inference"""
-    if device == 'auto':
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    
-    return QualityInference(checkpoint_path, device)
 
-def predict_single_image(image_path, model_path, visualize=False):
-    """Convenience function for single image prediction"""
-    engine = QualityInference(model_path)
-    return engine.predict(image_path, visualize=visualize) 
+def main():
+    parser = argparse.ArgumentParser(description='Battery Quality Inference')
+    parser.add_argument('--model_path', type=str, required=True,
+                       help='Path to trained model checkpoint')
+    
+    # Either single image or directory
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument('--image_path', type=str,
+                      help='Path to single image')
+    group.add_argument('--image_dir', type=str,
+                      help='Directory containing images')
+    
+    parser.add_argument('--output_path', type=str,
+                       help='Path to save results JSON (optional)')
+    
+    args = parser.parse_args()
+    
+    # Validate model path
+    if not Path(args.model_path).exists():
+        raise ValueError(f"Model file does not exist: {args.model_path}")
+    
+    # Create inference engine
+    inference = BatteryQualityInference(args.model_path)
+    
+    # Run predictions
+    if args.image_path:
+        # Single image
+        print(f"\n🔍 Analyzing image: {args.image_path}")
+        results = inference.predict_single_image(args.image_path)
+        
+        # Print results
+        print(f"\n📊 RESULTS:")
+        print(f"Overall Quality: {results['overall_quality']['quality']} "
+              f"(confidence: {results['overall_quality']['confidence']:.3f})")
+        
+        print(f"\nComponent Quality:")
+        for component in ['hole', 'text', 'knob', 'surface']:
+            result = results[f'{component}_quality']
+            print(f"  {component.title()}: {result['quality']} ({result['confidence']:.3f})")
+        
+        print(f"\nSegmentation Analysis:")
+        seg = results['segmentation']
+        print(f"  Good holes: {seg['good_holes_pixels']} pixels")
+        print(f"  Deformed holes: {seg['deformed_holes_pixels']} pixels")
+        print(f"  Blocked holes: {seg['blocked_holes_pixels']} pixels")
+        print(f"  Text region: {seg['text_pixels']} pixels")
+        print(f"  Plus knob: {seg['plus_knob_pixels']} pixels")
+        print(f"  Minus knob: {seg['minus_knob_pixels']} pixels")
+        
+    else:
+        # Directory
+        print(f"\n🔍 Analyzing directory: {args.image_dir}")
+        results = inference.predict_directory(args.image_dir)
+        
+        # Print summary
+        total_images = len(results)
+        good_count = sum(1 for r in results.values() 
+                        if 'overall_quality' in r and r['overall_quality']['quality'] == 'GOOD')
+        bad_count = total_images - good_count
+        
+        print(f"\n📊 SUMMARY:")
+        print(f"Total images: {total_images}")
+        print(f"GOOD quality: {good_count}")
+        print(f"BAD quality: {bad_count}")
+        print(f"Success rate: {good_count/total_images*100:.1f}%")
+    
+    # Save results if requested
+    if args.output_path:
+        with open(args.output_path, 'w') as f:
+            json.dump(results, f, indent=2)
+        print(f"\n💾 Results saved to: {args.output_path}")
+    
+    print(f"\n✅ Inference completed!")
+
+
+if __name__ == "__main__":
+    main() 

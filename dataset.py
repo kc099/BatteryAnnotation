@@ -14,17 +14,22 @@ from pathlib import Path
 class ComponentQualityDataset(Dataset):
     """Dataset with separate quality labels for each component"""
     
-    def __init__(self, annotations_file, img_dir, transform=None, phase='train'):
-        self.img_dir = Path(img_dir)
+    def __init__(self, data_dir, split='train', train_ratio=0.8, transform=None, seed=42):
+        """
+        Args:
+            data_dir: Directory containing images and annotation files (e.g., extracted_frames_9182)
+            split: 'train' or 'val'  
+            train_ratio: Fraction of data for training
+            transform: Data augmentation pipeline
+            seed: Random seed for consistent splits
+        """
+        self.data_dir = Path(data_dir)
+        self.split = split
         self.transform = transform
-        self.phase = phase
         
-        # Load annotations
-        with open(annotations_file, 'r') as f:
-            self.annotations = json.load(f)
-        
-        # Filter by confidence if needed
-        self.annotations = [ann for ann in self.annotations if ann.get('confidence_score', 1.0) > 0.7]
+        # Auto-discover and split data
+        self.annotations = self._discover_and_split_data(train_ratio, seed)
+        print(f"✅ {split.upper()} dataset: {len(self.annotations)} samples")
         
         # Component quality mapping - Fixed to handle both string formats
         self.quality_map = {
@@ -34,19 +39,71 @@ class ComponentQualityDataset(Dataset):
             "UNKNOWN": -1, "unknown": -1
         }
         
+    def _discover_and_split_data(self, train_ratio, seed):
+        """Auto-discover annotation files and split train/val"""
+        print(f"🔍 Discovering data in {self.data_dir}")
+        
+        # Find all annotation files
+        annotation_files = list(self.data_dir.glob("*_enhanced_annotation.json"))
+        
+        if not annotation_files:
+            raise ValueError(f"No annotation files found in {self.data_dir}")
+        
+        print(f"   Found {len(annotation_files)} annotation files")
+        
+        # Load and validate annotations
+        valid_annotations = []
+        for ann_file in annotation_files:
+            # Find corresponding image
+            image_file = ann_file.with_name(ann_file.name.replace('_enhanced_annotation.json', '.jpg'))
+            
+            if not image_file.exists():
+                print(f"   ⚠️  Missing image for {ann_file.name}")
+                continue
+                
+            # Load annotation
+            try:
+                with open(ann_file, 'r') as f:
+                    ann = json.load(f)
+                
+                # Add file paths
+                ann['annotation_file'] = str(ann_file)
+                ann['image_file'] = str(image_file)
+                
+                # Filter by confidence
+                if ann.get('confidence_score', 1.0) > 0.7:
+                    valid_annotations.append(ann)
+                    
+            except Exception as e:
+                print(f"   ⚠️  Error loading {ann_file.name}: {e}")
+                continue
+        
+        print(f"   ✅ {len(valid_annotations)} valid samples (confidence > 0.7)")
+        
+        # Deterministic split
+        import random
+        random.seed(seed)
+        indices = list(range(len(valid_annotations)))
+        random.shuffle(indices)
+        
+        split_idx = int(len(valid_annotations) * train_ratio)
+        
+        if self.split == 'train':
+            selected_indices = indices[:split_idx]
+        else:  # val
+            selected_indices = indices[split_idx:]
+        
+        return [valid_annotations[i] for i in selected_indices]
+
     def __len__(self):
         return len(self.annotations)
     
     def __getitem__(self, idx):
         ann = self.annotations[idx]
         
-        # Load image - Fixed path handling
-        img_path = self._get_image_path(ann['image_path'])
-        image = cv2.imread(str(img_path))
-        if image is None:
-            # Try with .jpg extension if .mov was in annotation
-            img_path = self.img_dir / (Path(ann['image_path']).stem + '.jpg')
-            image = cv2.imread(str(img_path))
+        # Load image - Use stored image path
+        img_path = ann['image_file']
+        image = cv2.imread(img_path)
         
         if image is None:
             raise ValueError(f"Could not load image: {img_path}")
@@ -91,24 +148,7 @@ class ComponentQualityDataset(Dataset):
             'has_perspective': torch.tensor(ann.get('perspective_points') is not None, dtype=torch.float32)
         }
     
-    def _get_image_path(self, annotation_path):
-        """Convert annotation image path to actual image path"""
-        # Handle absolute paths in annotations
-        path_obj = Path(annotation_path)
-        image_name = path_obj.name
-        
-        # Try to find the image in the specified img_dir
-        full_path = self.img_dir / image_name
-        if full_path.exists():
-            return full_path
-            
-        # Try with .jpg extension
-        jpg_path = self.img_dir / (path_obj.stem + '.jpg')
-        if jpg_path.exists():
-            return jpg_path
-            
-        # Fallback to original annotation path
-        return Path(annotation_path)
+
     
     def _get_quality_label(self, ann, quality_key, qualities_array_key=None):
         """Extract and normalize quality labels from annotations"""

@@ -58,8 +58,8 @@ class HierarchicalQualityModel(nn.Module):
             nn.Dropout(0.2),
             nn.Linear(128, 64),
             nn.ReLU(),
-            nn.Linear(64, 1),
-            nn.Sigmoid()
+            nn.Linear(64, 1)
+            # No sigmoid - BCEWithLogitsLoss expects logits
         )
         
         # Store input size for proper resizing
@@ -74,8 +74,8 @@ class HierarchicalQualityModel(nn.Module):
             nn.Dropout(0.2),
             nn.Linear(128, 64),
             nn.ReLU(),
-            nn.Linear(64, 1),
-            nn.Sigmoid()
+            nn.Linear(64, 1)
+            # No sigmoid - BCEWithLogitsLoss expects logits
         )
     
     def forward(self, x, features=None):
@@ -149,8 +149,8 @@ class ComponentAwareLoss(nn.Module):
         # Segmentation loss
         self.seg_criterion = nn.BCEWithLogitsLoss(reduction='none')
         
-        # Quality losses (binary classification)
-        self.quality_criterion = nn.BCELoss(reduction='none')
+        # Quality losses (binary classification) - Use BCEWithLogitsLoss for mixed precision
+        self.quality_criterion = nn.BCEWithLogitsLoss(reduction='none')
     
     def forward(self, predictions, targets):
         losses = {}
