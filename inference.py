@@ -218,7 +218,7 @@ Surface: {predictions['surface_quality']['quality']} ({predictions['surface_qual
         print(f"💾 Visualization saved: {viz_path}")
         return str(viz_path)
     
-    def predict_directory(self, image_dir):
+    def predict_directory(self, image_dir, save_visualization=False, output_dir=None):
         """Predict quality for all images in a directory"""
         image_dir = Path(image_dir)
         
@@ -234,12 +234,16 @@ Surface: {predictions['surface_quality']['quality']} ({predictions['surface_qual
             return {}
         
         print(f"🔍 Found {len(image_files)} images")
+        if save_visualization:
+            print(f"📊 Creating visualizations...")
         
         results = {}
         for image_file in image_files:
             try:
                 print(f"   Processing {image_file.name}...")
-                predictions = self.predict_single_image(image_file)
+                predictions = self.predict_single_image(image_file, 
+                                                      save_visualization=save_visualization,
+                                                      output_dir=output_dir)
                 results[str(image_file)] = predictions
             except Exception as e:
                 print(f"   ❌ Error processing {image_file.name}: {e}")
@@ -308,7 +312,9 @@ def main():
     else:
         # Directory
         print(f"\n🔍 Analyzing directory: {args.image_dir}")
-        results = inference.predict_directory(args.image_dir)
+        results = inference.predict_directory(args.image_dir,
+                                            save_visualization=args.visualize,
+                                            output_dir=args.viz_output_dir)
         
         # Print summary
         total_images = len(results)
