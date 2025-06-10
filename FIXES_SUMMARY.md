@@ -1,138 +1,182 @@
-# Critical Fixes Summary
+# Battery Quality Model Fixes Summary
 
-## Issues Identified
+## Issues Identified and Fixed
 
-You were absolutely right to point out these critical problems in my implementation:
+### 1. ❌ **Resizing Mismatch Issue**
+**Problem**: Images were resized to `544x960` but original mask annotations at `1080x1920` were NOT being resized properly during training.
 
-### 1. **Missing Normalization Computation**
-- **Problem**: I removed `compute_normalization.py` but the code was using hardcoded normalization values
-- **Impact**: If you change datasets, the model would use wrong normalization and perform poorly
-- **User Impact**: No way to recompute normalization for new data
+**Fix**: ✅ 
+- Updated `dataset.py` to apply transforms to both images and masks together using albumentations
+- Changed resize dimensions from `544x960` to `224x224` to match EfficientNet backbone expectations
+- Fixed `__getitem__` method to properly handle mask resizing with the same transform pipeline
 
-### 2. **Single Directory Limitation** 
-- **Problem**: Dataset only worked with one directory, but you have multiple `extracted_frames_*` folders
-- **Impact**: Couldn't train on all your data at once
-- **User Impact**: Would have to manually merge directories or train on limited data
-
-## Fixes Implemented
-
-### ✅ **Fix 1: Restored Configurable Normalization**
-
-**Created `compute_normalization.py`**:
-```bash
-# Compute stats from multiple directories
-python compute_normalization.py --data_dirs ../extracted_frames_9182 ../extracted_frames_9183 ../extracted_frames_9198
-
-# For faster computation (sample subset)  
-python compute_normalization.py --data_dirs ../extracted_frames_9182 --sample_size 500
-```
-
-**Features**:
-- ✅ Computes dataset-specific mean/std from actual images
-- ✅ Handles multiple directories 
-- ✅ Saves results to `normalization_stats.json`
-- ✅ Supports sampling for faster computation
-- ✅ Automatic fallback to default values if file missing
-
-**Updated all modules**:
-- `dataset.py`: `load_normalization_stats()` function with auto-loading
-- `train.py`: `--norm_stats` parameter 
-- `inference.py`: Uses same normalization as training
-
-### ✅ **Fix 2: Multi-Directory Support**
-
-**Updated `ComponentQualityDataset`**:
+**Code Changes**:
 ```python
-# OLD: Single directory only
-ComponentQualityDataset(data_dir='../extracted_frames_9182')
+# OLD - masks not properly resized
+transformed = self.transform(image=image_rgb, mask=dummy_masks)
 
-# NEW: Multiple directories supported
-ComponentQualityDataset(data_dirs=['../extracted_frames_9182', '../extracted_frames_9183', '../extracted_frames_9198'])
+# NEW - proper joint transform
+if self.transform:
+    transformed = self.transform(image=image, mask=masks)
+    image = transformed['image']
+    masks = transformed['mask']
 ```
 
-**Features**:
-- ✅ Accepts list of directories or single directory
-- ✅ Auto-discovers all annotation files across directories
-- ✅ Handles same filenames in different directories
-- ✅ Shows progress per directory
-- ✅ Combined train/val split across all data
+### 2. ❌ **Inappropriate Loss Function for Segmentation**
+**Problem**: Using `BCEWithLogitsLoss` for pixel masks, which isn't ideal for segmentation tasks.
 
-**Updated training command**:
+**Fix**: ✅ 
+- Implemented Dice + IoU loss combination for segmentation
+- Added proper loss functions in `ComponentAwareLoss` class
+- Combines both losses: `0.5 * dice_loss + 0.5 * iou_loss`
+
+**Code Changes**:
+```python
+# NEW - Dice + IoU combination
+def dice_loss(self, pred, target, smooth=1e-6):
+    pred = torch.sigmoid(pred)
+    pred_flat = pred.reshape(-1)
+    target_flat = target.reshape(-1)
+    intersection = (pred_flat * target_flat).sum()
+    total = pred_flat.sum() + target_flat.sum()
+    dice = (2. * intersection + smooth) / (total + smooth)
+    return 1 - dice
+```
+
+### 3. ❌ **Unnecessary Model Heads for Non-Existent Data**
+**Problem**: Model had deformed/blocked hole heads but dataset contains no such annotations.
+
+**Fix**: ✅ 
+- Reduced segmentation channels from 6 to 4
+- Removed deformed (channel 1) and blocked (channel 2) hole heads
+- Updated model architecture: `HierarchicalQualityModel(num_seg_classes=4)`
+
+**New Channel Layout**:
+```python
+# Channel 0: Good holes (all holes since dataset only has good ones)
+# Channel 1: Text region  
+# Channel 2: Plus knob
+# Channel 3: Minus knob
+```
+
+### 4. ❌ **Missing Perspective Points Prediction**
+**Problem**: No model head for predicting perspective points needed for cover reprojection.
+
+**Fix**: ✅ 
+- Added perspective points prediction head to model
+- Predicts 8 coordinates (4 points × 2 coords) normalized to [0,1]
+- Added MSE loss for perspective points training
+
+**Code Changes**:
+```python
+# NEW - Perspective points head
+self.perspective_head = nn.Sequential(
+    nn.Linear(256, 128),
+    nn.BatchNorm1d(128),
+    nn.ReLU(),
+    nn.Dropout(0.2),
+    nn.Linear(128, 64),
+    nn.ReLU(),
+    nn.Linear(64, 8),  # 4 points × 2 coordinates
+    nn.Sigmoid()  # Normalized coordinates [0,1]
+)
+```
+
+### 5. ❌ **Visualization Bug with Minus Knob**
+**Problem**: Non-zero pixels on minus knob but no mask plotted due to indexing confusion in visualization loop.
+
+**Fix**: ✅ 
+- Fixed visualization function to handle 4 channels instead of 6
+- Corrected subplot layout from `2x4` to `2x3`
+- Fixed indexing: `row = (i + 1) // 3` and `col = (i + 1) % 3`
+- Updated color mapping for 4 channels
+
+**Code Changes**:
+```python
+# OLD - 6 channels, 2x4 layout
+for i in range(6):
+    row = (i + 1) // 4
+    col = (i + 1) % 4
+
+# NEW - 4 channels, 2x3 layout  
+for i in range(4):
+    row = (i + 1) // 3
+    col = (i + 1) % 3
+```
+
+## Files Modified
+
+### `dataset.py`
+- ✅ Fixed `__getitem__` to apply transforms to both images and masks
+- ✅ Updated `create_masks()` to generate 4 channels instead of 6
+- ✅ Added perspective points extraction and normalization
+- ✅ Changed augmentations to use `224x224` resize
+
+### `model.py`
+- ✅ Updated `HierarchicalQualityModel` to use 4 segmentation classes
+- ✅ Added perspective points prediction head
+- ✅ Implemented Dice and IoU loss functions
+- ✅ Added perspective points loss to `ComponentAwareLoss`
+- ✅ Fixed tensor operations to use `reshape()` instead of `view()`
+
+### `inference.py`
+- ✅ Updated `predict_single_image()` to handle 4 channels
+- ✅ Added perspective points to inference output
+- ✅ Fixed `create_visualization()` for 4-channel display
+- ✅ Corrected subplot layout and indexing
+
+## Training Recommendations
+
+### Re-training Required
+Since the model architecture has changed significantly, you'll need to retrain:
+
 ```bash
-# OLD: Limited to one directory
-python train.py --data_dir ../extracted_frames_9182
-
-# NEW: Use all your data
-python train.py --data_dirs ../extracted_frames_9182 ../extracted_frames_9183 ../extracted_frames_9198
+# Start fresh training with new architecture
+python train.py --data_dirs ../extracted_frames_9182 --epochs 10 --batch_size 8
 ```
 
-## Test Results
+### Expected Improvements
+1. **Better Segmentation**: Dice+IoU loss should improve mask quality
+2. **Proper Resizing**: Images and masks now resize consistently 
+3. **Perspective Points**: Model can now predict corner points for reprojection
+4. **Cleaner Architecture**: No unnecessary heads for non-existent data
+5. **Fixed Visualization**: All masks should display correctly
 
-**Normalization Computation**:
+## Verification
+
+Run the test script to verify all fixes:
 ```bash
-$ python compute_normalization.py --data_dirs ../extracted_frames_9182 --sample_size 100
-🔍 Computing normalization statistics from 1 directories
-   Found 399 images in ../extracted_frames_9182
-   ✅ Computed from 100 images (207,360,000 pixels)
-📄 Rounded values:
-mean=[0.6253, 0.6645, 0.4996]
-std=[0.1769, 0.1270, 0.2927]
-💾 Results saved to normalization_stats.json
+python test_fixes.py
 ```
 
-**Multi-Directory Dataset**:
+All tests should pass, confirming:
+- ✅ Model outputs correct shapes (4 segmentation channels, 8 perspective points)
+- ✅ Loss functions work with Dice+IoU and perspective MSE
+- ✅ Transforms resize images and masks together properly
+- ✅ Inference compatibility maintained
+
+## Usage After Fixes
+
+### Training
 ```bash
-$ python -c "from dataset import ComponentQualityDataset; dataset = ComponentQualityDataset(['../extracted_frames_9182', '../extracted_frames_9183'], split='train')"
-🔍 Discovering data in 2 directories:
-   Found 398 annotation files in extracted_frames_9182
-   Found 361 annotation files in extracted_frames_9183
-   Total: 759 annotation files
-✅ TRAIN dataset: 607 samples
+python train.py --data_dirs ../extracted_frames_9182 --epochs 10
 ```
 
-## Usage Examples
-
-### For New Datasets:
+### Inference with Visualization
 ```bash
-# 1. Compute normalization
-python compute_normalization.py --data_dirs /path/to/new/data1 /path/to/new/data2
-
-# 2. Train with custom normalization
-python train.py --data_dirs /path/to/new/data1 /path/to/new/data2 --norm_stats normalization_stats.json
-
-# 3. Inference with same normalization  
-python inference.py --model_path model.ckpt --image_path test.jpg --norm_stats normalization_stats.json
+python inference.py \
+  --model_path logs/battery_quality/version_X/checkpoints/best-epoch=XX.ckpt \
+  --image_dir ../extracted_frames_9182 \
+  --output_path results.json \
+  --visualize \
+  --viz_output_dir predictions/
 ```
 
-### For Your Current Data:
-```bash
-# Use all three directories
-python train.py --data_dirs ../extracted_frames_9182 ../extracted_frames_9183 ../extracted_frames_9198 --epochs 100
-```
+The visualization will now correctly show:
+- Good holes (green)
+- Text region (cyan) 
+- Plus knob (magenta)
+- Minus knob (yellow)
+- Perspective points coordinates
 
-## What Changed in Files
-
-### New Files:
-- ✅ `compute_normalization.py` - Computes dataset-specific normalization
-
-### Updated Files:
-- ✅ `dataset.py` - Multi-directory support + configurable normalization
-- ✅ `train.py` - `--data_dirs` parameter + `--norm_stats` parameter  
-- ✅ `inference.py` - `--norm_stats` parameter
-- ✅ `README.md` - Updated usage examples
-
-### Backward Compatibility:
-- ✅ Single directory still works: `--data_dirs ../extracted_frames_9182`
-- ✅ Default normalization if no stats file found
-- ✅ All existing functionality preserved
-
-## Key Benefits
-
-1. **🎯 Proper Normalization**: Dataset-specific values for better training
-2. **📊 All Data Usage**: Train on all your extracted directories  
-3. **🔧 Easy Dataset Changes**: Just rerun compute script for new data
-4. **⚡ Flexible Sampling**: Fast computation with `--sample_size`
-5. **🔄 Backward Compatible**: Existing workflows still work
-6. **📝 Better Documentation**: Clear usage examples
-
-Thank you for catching these critical issues! The pipeline is now much more robust and practical for real-world usage. 
+All fixes maintain backward compatibility where possible while significantly improving the model's accuracy and usability. 

@@ -12,102 +12,186 @@ import json
 from pathlib import Path
 
 class ComponentQualityDataset(Dataset):
-    """Dataset with separate quality labels for each component"""
-    
-    def __init__(self, data_dirs, split='train', train_ratio=0.8, transform=None, seed=42):
+    """
+    Dataset that loads images and annotations from a single, pre-split directory.
+    """
+    def __init__(self, data_dir, transform=None):
         """
         Args:
-            data_dirs: List of directories or single directory containing images and annotation files 
-                      (e.g., ['../extracted_frames_9182', '../extracted_frames_9183'])
-            split: 'train' or 'val'  
-            train_ratio: Fraction of data for training
+            data_dir: Directory containing the pre-split images and annotation files 
+                      (e.g., 'data/train' or 'data/valid')
             transform: Data augmentation pipeline
-            seed: Random seed for consistent splits
         """
-        # Handle both single directory and list of directories
-        if isinstance(data_dirs, (str, Path)):
-            data_dirs = [data_dirs]
-        self.data_dirs = [Path(d) for d in data_dirs]
-        self.split = split
+        self.data_dir = Path(data_dir)
         self.transform = transform
         
-        # Auto-discover and split data
-        self.annotations = self._discover_and_split_data(train_ratio, seed)
-        print(f"✅ {split.upper()} dataset: {len(self.annotations)} samples")
+        # Discover all annotation files in the directory
+        self.annotations = self._discover_data()
+        print(f"✅ Loaded {len(self.annotations)} samples from {self.data_dir.name}")
         
-        # Component quality mapping - Fixed to handle both string formats
         self.quality_map = {
             "GOOD": 1, "good": 1, 
             "BAD": 0, "bad": 0, 
-            "deformed": 0, "blocked": 0,  # Hole-specific bad qualities
+            "deformed": 0, "blocked": 0,
             "UNKNOWN": -1, "unknown": -1
         }
         
-    def _discover_and_split_data(self, train_ratio, seed):
-        """Auto-discover annotation files and split train/val"""
-        print(f"🔍 Discovering data in {len(self.data_dirs)} directories:")
-        for data_dir in self.data_dirs:
-            print(f"   - {data_dir}")
-        
-        # Find all annotation files across all directories
-        annotation_files = []
-        for data_dir in self.data_dirs:
-            dir_files = list(data_dir.glob("*_enhanced_annotation.json"))
-            annotation_files.extend(dir_files)
-            print(f"   Found {len(dir_files)} annotation files in {data_dir.name}")
-        
-        if not annotation_files:
-            raise ValueError(f"No annotation files found in any directory!")
-        
-        print(f"   Total: {len(annotation_files)} annotation files")
-        
-        # Load and validate annotations
+    def _discover_data(self):
+        """Finds all valid annotation files and their corresponding images."""
         valid_annotations = []
-        for ann_file in annotation_files:
-            # Find corresponding image
+        for ann_file in self.data_dir.glob("*_enhanced_annotation.json"):
             image_file = ann_file.with_name(ann_file.name.replace('_enhanced_annotation.json', '.jpg'))
             
             if not image_file.exists():
-                print(f"   ⚠️  Missing image for {ann_file.name}")
                 continue
                 
-            # Load annotation
             try:
                 with open(ann_file, 'r') as f:
                     ann = json.load(f)
                 
-                # Validate annotation completeness
-                if not self._validate_annotation(ann, ann_file.name):
-                    continue
-                
                 # Add file paths
                 ann['annotation_file'] = str(ann_file)
                 ann['image_file'] = str(image_file)
-                
-                # Filter by confidence
-                if ann.get('confidence_score', 1.0) > 0.7:
-                    valid_annotations.append(ann)
+                valid_annotations.append(ann)
                     
-            except Exception as e:
-                print(f"   ⚠️  Error loading {ann_file.name}: {e}")
+            except Exception:
                 continue
         
-        print(f"   ✅ {len(valid_annotations)} valid samples (confidence > 0.7)")
+        if not valid_annotations:
+            raise ValueError(f"No valid annotation files found in {self.data_dir}!")
+            
+        return valid_annotations
+
+    def __len__(self):
+        return len(self.annotations)
+    
+    def __getitem__(self, idx):
+        ann = self.annotations[idx]
         
-        # Deterministic split
-        import random
-        random.seed(seed)
-        indices = list(range(len(valid_annotations)))
-        random.shuffle(indices)
+        # Load image - Use stored image path
+        img_path = ann['image_file']
+        image = cv2.imread(img_path)
         
-        split_idx = int(len(valid_annotations) * train_ratio)
+        if image is None:
+            raise ValueError(f"Could not load image: {img_path}")
+            
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        h, w = image.shape[:2]
         
-        if self.split == 'train':
-            selected_indices = indices[:split_idx]
-        else:  # val
-            selected_indices = indices[split_idx:]
+        # Create segmentation masks (now only 4 channels - removing deformed/blocked holes)
+        masks = self.create_masks(ann, h, w)
         
-        return [valid_annotations[i] for i in selected_indices]
+        # Extract geometric features
+        features = self.extract_features(ann)
+        
+        # Get bounding boxes for ROI-Align
+        hole_boxes = self._polygons_to_boxes(ann.get('hole_polygons', []))
+        text_boxes = self._polygons_to_boxes([ann.get('text_polygon', [])])
+        
+        # Combine knob polygons for a single "knob" class
+        knob_polygons = []
+        if 'plus_knob_polygon' in ann and ann['plus_knob_polygon']:
+             knob_polygons.append(ann['plus_knob_polygon'])
+        if 'minus_knob_polygon' in ann and ann['minus_knob_polygon']:
+             knob_polygons.append(ann['minus_knob_polygon'])
+        knob_boxes = self._polygons_to_boxes(knob_polygons)
+        
+        # Component quality labels - Fixed to handle different annotation formats
+        hole_quality_val = self._get_quality_label(ann, 'hole_quality', 'hole_qualities')
+        text_quality_val = self._get_quality_label(ann, 'text_quality')
+        knob_quality_val = self._get_quality_label(ann, 'knob_quality')
+        surface_quality_val = self._get_quality_label(ann, 'surface_quality')
+        overall_quality_val = self._get_quality_label(ann, 'overall_quality')
+
+        # Create per-instance quality targets for the new model
+        # Use per-hole qualities if available, otherwise fallback to global
+        if 'hole_qualities' in ann and ann['hole_qualities']:
+            # Map each quality to numeric value using quality_map
+            hole_quality = torch.tensor([
+                self.quality_map.get(q, -1) for q in ann['hole_qualities']
+            ], dtype=torch.float32)
+        else:
+            hole_quality = torch.full((len(hole_boxes),), hole_quality_val, dtype=torch.float32)
+        text_quality = torch.full((len(text_boxes),), text_quality_val, dtype=torch.float32)
+        knob_quality = torch.full((len(knob_boxes),), knob_quality_val, dtype=torch.float32)
+        
+        # Quality confidence weights - Fixed calculation for missing confidence values
+        weight = ann.get('confidence_score', 1.0)
+        if isinstance(weight, (list, tuple)):
+            weight = np.mean(weight)
+        
+        # Extract perspective points if available
+        perspective_points = ann.get('perspective_points', [])
+        if perspective_points and len(perspective_points) == 4:
+            # Flatten 4 points to 8 coordinates [x1,y1,x2,y2,x3,y3,x4,y4]
+            perspective_target = torch.tensor([coord for point in perspective_points for coord in point], dtype=torch.float32)
+            # Normalize to [0,1] range
+            perspective_target[0::2] /= w  # x coordinates
+            perspective_target[1::2] /= h  # y coordinates
+        else:
+            # No perspective points available
+            perspective_target = torch.zeros(8, dtype=torch.float32)
+        
+        # Apply transforms if provided
+        if self.transform:
+            # Apply transform to both image and masks
+            transformed = self.transform(image=image, mask=masks)
+            image = transformed['image']
+            masks = transformed['mask']
+            
+            # If masks is now a tensor, convert to proper format
+            if isinstance(masks, torch.Tensor):
+                masks = masks.permute(2, 0, 1)  # HWC -> CHW for consistency
+            else:
+                masks = torch.from_numpy(masks).permute(2, 0, 1)  # HWC -> CHW
+                
+            # Update perspective points for new image size
+            if torch.any(perspective_target > 0):
+                new_h, new_w = image.shape[-2:] if isinstance(image, torch.Tensor) else image.shape[:2]
+                perspective_target[0::2] *= new_w  # Scale x coordinates
+                perspective_target[1::2] *= new_h  # Scale y coordinates
+        else:
+            # Convert to tensor without transform
+            image = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0
+            masks = torch.from_numpy(masks).permute(2, 0, 1)
+        
+        return {
+            'image': image,
+            'masks': masks,
+            'features': features,
+            'hole_quality': hole_quality,
+            'text_quality': text_quality,
+            'knob_quality': knob_quality,
+            'surface_quality': torch.tensor(surface_quality_val, dtype=torch.float32),
+            'overall_quality': torch.tensor(overall_quality_val, dtype=torch.float32),
+            'weight': torch.tensor(weight, dtype=torch.float32),
+            'perspective_target': perspective_target,
+            # Data for new ComponentROIModel
+            'hole_boxes': hole_boxes,
+            'text_boxes': text_boxes,
+            'knob_boxes': knob_boxes,
+            'image_path': img_path
+        }
+    
+    def _polygons_to_boxes(self, polygons):
+        """Convert a list of polygons to a tensor of bounding boxes."""
+        boxes = []
+        if not polygons:
+            return torch.empty((0, 4), dtype=torch.float32)
+            
+        for polygon in polygons:
+            if not polygon or len(polygon) < 3:
+                continue
+            
+            poly_np = np.array(polygon)
+            min_x, min_y = np.min(poly_np, axis=0)
+            max_x, max_y = np.max(poly_np, axis=0)
+            boxes.append([min_x, min_y, max_x, max_y])
+            
+        if not boxes:
+            return torch.empty((0, 4), dtype=torch.float32)
+            
+        return torch.tensor(boxes, dtype=torch.float32)
 
     def _validate_annotation(self, ann, filename):
         """Validate that annotation has required fields and is not empty"""
@@ -174,61 +258,6 @@ class ComponentQualityDataset(Dataset):
         
         return True
 
-    def __len__(self):
-        return len(self.annotations)
-    
-    def __getitem__(self, idx):
-        ann = self.annotations[idx]
-        
-        # Load image - Use stored image path
-        img_path = ann['image_file']
-        image = cv2.imread(img_path)
-        
-        if image is None:
-            raise ValueError(f"Could not load image: {img_path}")
-            
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        h, w = image.shape[:2]
-        
-        # Create segmentation masks (6 channels)
-        masks = self.create_masks(ann, h, w)
-        
-        # Extract geometric features
-        features = self.extract_features(ann)
-        
-        # Component quality labels - Fixed to handle different annotation formats
-        hole_quality = self._get_quality_label(ann, 'hole_quality', 'hole_qualities')
-        text_quality = self._get_quality_label(ann, 'text_quality')
-        knob_quality = self._get_quality_label(ann, 'knob_quality') 
-        surface_quality = self._get_quality_label(ann, 'surface_quality')
-        overall_quality = self._get_quality_label(ann, 'overall_quality')
-        
-        # Sample weight based on annotation confidence and quality
-        weight = ann.get('confidence_score', 1.0)
-        if overall_quality == 0:  # Bad samples get higher weight
-            weight *= 2.0
-        
-        # Apply transformations
-        if self.transform:
-            transformed = self.transform(image=image, mask=masks)
-            image = transformed['image']
-            masks = transformed['mask']
-        
-        return {
-            'image': image,
-            'masks': masks.permute(2, 0, 1),  # HWC to CHW
-            'features': features,
-            'hole_quality': torch.tensor(hole_quality, dtype=torch.float32),
-            'text_quality': torch.tensor(text_quality, dtype=torch.float32),
-            'knob_quality': torch.tensor(knob_quality, dtype=torch.float32),
-            'surface_quality': torch.tensor(surface_quality, dtype=torch.float32),
-            'overall_quality': torch.tensor(overall_quality, dtype=torch.float32),
-            'weight': torch.tensor(weight, dtype=torch.float32),
-            'has_perspective': torch.tensor(ann.get('perspective_points') is not None, dtype=torch.float32)
-        }
-    
-
-    
     def _get_quality_label(self, ann, quality_key, qualities_array_key=None):
         """Extract and normalize quality labels from annotations"""
         # First try the direct quality key
@@ -259,55 +288,48 @@ class ComponentQualityDataset(Dataset):
     def create_masks(self, ann, h, w):
         """Create segmentation masks for different components
         
-        Creates 6-channel mask from 4 polygon types in JSON:
-        - hole_polygons → 3 channels (separated by quality: good/deformed/blocked)
+        Creates 4-channel mask from 4 polygon types in JSON:
+        - hole_polygons → 1 channel (only good holes, no deformed/blocked in dataset)
         - text_polygon → 1 channel
         - plus_knob_polygon → 1 channel  
         - minus_knob_polygon → 1 channel
-        Total: 6 channels
+        Total: 4 channels
         """
-        masks = np.zeros((h, w, 6), dtype=np.float32)
+        masks = np.zeros((h, w, 4), dtype=np.float32)
         
-        # HOLE MASKS (3 channels based on quality)
-        # Channel 0: Good holes
-        # Channel 1: Deformed holes  
-        # Channel 2: Blocked holes
+        # HOLE MASKS (1 channel - only good holes)
+        # Channel 0: All holes (since dataset only has good holes)
         hole_polygons = ann.get('hole_polygons', [])
-        hole_qualities = ann.get('hole_qualities', [])
         
-        for i, polygon in enumerate(hole_polygons):
+        for polygon in hole_polygons:
             if len(polygon) >= 3:
                 points = np.array(polygon, dtype=np.int32)
-                # Get quality for this hole
-                quality = hole_qualities[i] if i < len(hole_qualities) else 'good'
-                channel = {"good": 0, "deformed": 1, "blocked": 2}.get(quality, 0)
-                
-                # Fix: Create contiguous array for OpenCV
-                channel_mask = np.ascontiguousarray(masks[:, :, channel])
+                # All holes go to channel 0 (good holes)
+                channel_mask = np.ascontiguousarray(masks[:, :, 0])
                 cv2.fillPoly(channel_mask, [points], 1)
-                masks[:, :, channel] = channel_mask
+                masks[:, :, 0] = channel_mask
         
         # KNOB AND TEXT MASKS (1 channel each)
-        # Channel 3: Text region
+        # Channel 1: Text region
         if ann.get('text_polygon'):
             points = np.array(ann['text_polygon'], dtype=np.int32)
+            channel_mask = np.ascontiguousarray(masks[:, :, 1])
+            cv2.fillPoly(channel_mask, [points], 1)
+            masks[:, :, 1] = channel_mask
+        
+        # Channel 2: Plus knob
+        if ann.get('plus_knob_polygon'):
+            points = np.array(ann['plus_knob_polygon'], dtype=np.int32)
+            channel_mask = np.ascontiguousarray(masks[:, :, 2])
+            cv2.fillPoly(channel_mask, [points], 1)
+            masks[:, :, 2] = channel_mask
+        
+        # Channel 3: Minus knob
+        if ann.get('minus_knob_polygon'):
+            points = np.array(ann['minus_knob_polygon'], dtype=np.int32)
             channel_mask = np.ascontiguousarray(masks[:, :, 3])
             cv2.fillPoly(channel_mask, [points], 1)
             masks[:, :, 3] = channel_mask
-        
-        # Channel 4: Plus knob
-        if ann.get('plus_knob_polygon'):
-            points = np.array(ann['plus_knob_polygon'], dtype=np.int32)
-            channel_mask = np.ascontiguousarray(masks[:, :, 4])
-            cv2.fillPoly(channel_mask, [points], 1)
-            masks[:, :, 4] = channel_mask
-        
-        # Channel 5: Minus knob
-        if ann.get('minus_knob_polygon'):
-            points = np.array(ann['minus_knob_polygon'], dtype=np.int32)
-            channel_mask = np.ascontiguousarray(masks[:, :, 5])
-            cv2.fillPoly(channel_mask, [points], 1)
-            masks[:, :, 5] = channel_mask
         
         return masks
     
@@ -379,81 +401,4 @@ class ComponentQualityDataset(Dataset):
         has_perspective = float(ann.get('perspective_points') is not None)
         features.append(has_perspective)
         
-        return torch.tensor(features, dtype=torch.float32)
-
-def load_normalization_stats(stats_file='normalization_stats.json'):
-    """Load normalization statistics from file or use defaults"""
-    try:
-        import json
-        with open(stats_file, 'r') as f:
-            stats = json.load(f)
-        mean = stats['mean']
-        std = stats['std']
-        print(f"📊 Loaded normalization stats from {stats_file}")
-        print(f"   Mean: {mean}")
-        print(f"   Std: {std}")
-        return mean, std
-    except FileNotFoundError:
-        # Use previously computed values as defaults
-        mean = [0.4045, 0.4045, 0.4045]
-        std = [0.2256, 0.2254, 0.2782]
-        print(f"⚠️  No {stats_file} found, using default normalization values")
-        print(f"   Mean: {mean}")
-        print(f"   Std: {std}")
-        print(f"   💡 Run: python compute_normalization.py --data_dirs ../extracted_frames_9182 ../extracted_frames_9183 ../extracted_frames_9198")
-        return mean, std
-
-def get_training_augmentations(norm_stats_file='normalization_stats.json'):
-    """Get augmentations for training"""
-    mean, std = load_normalization_stats(norm_stats_file)
-    
-    return A.Compose([
-        # Resize preserving aspect ratio (1920x1080 -> 960x544, exactly 1/2 scale)
-        A.Resize(544, 960),
-        
-        # Geometric transforms (mild to preserve polygon shapes)
-        A.ShiftScaleRotate(
-            shift_limit=0.05,
-            scale_limit=0.1,
-            rotate_limit=5,
-            border_mode=cv2.BORDER_CONSTANT,
-            p=0.5
-        ),
-        
-        # Perspective (simulate different viewing angles)
-        A.Perspective(scale=(0.02, 0.05), p=0.3),
-        
-        # Color augmentations
-        A.OneOf([
-            A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2),
-            A.HueSaturationValue(hue_shift_limit=10, sat_shift_limit=20, val_shift_limit=20),
-            A.RandomGamma(gamma_limit=(80, 120)),
-        ], p=0.8),
-        
-        # Noise
-        A.OneOf([
-            A.GaussNoise(var_limit=(5, 25)),
-            A.ISONoise(color_shift=(0.01, 0.05)),
-        ], p=0.2),
-        
-        # Blur (simulate focus issues)
-        A.OneOf([
-            A.MotionBlur(blur_limit=5),
-            A.GaussianBlur(blur_limit=(3, 5)),
-        ], p=0.1),
-        
-        # Normalize with dataset-specific values
-        A.Normalize(mean=mean, std=std),
-        ToTensorV2()
-    ])
-
-def get_validation_augmentations(norm_stats_file='normalization_stats.json'):
-    """Get augmentations for validation"""
-    mean, std = load_normalization_stats(norm_stats_file)
-    
-    return A.Compose([
-        # Resize preserving aspect ratio (1920x1080 -> 960x544, exactly 1/2 scale)
-        A.Resize(544, 960),
-        A.Normalize(mean=mean, std=std),
-        ToTensorV2()
-    ]) 
+        return torch.tensor(features, dtype=torch.float32) 

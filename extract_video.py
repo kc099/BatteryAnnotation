@@ -119,8 +119,8 @@ def batch_extract_frames(video_paths, output_base_folder, **kwargs):
 # Example usage
 if __name__ == "__main__":
     # Single video extraction
-    video_file = "IMG_9182.mov"  # Replace with your .mov file path
-    output_directory = "extracted_frames_9182"  # Output folder name
+    video_file = "O:/Amaron/IMG_9219.MOV"  # Replace with your .mov file path
+    output_directory = "O:/Amaron/extracted_frames_9219"  # Output folder name
     
     # Basic extraction - save all frames
     extract_frames_from_video(video_file, output_directory)
