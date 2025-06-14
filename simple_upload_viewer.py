@@ -307,31 +307,61 @@ class SimpleUploadViewer:
                 cv2.circle(vis_image, (x, y), 8, (0, 255, 0), -1)
                 cv2.putText(vis_image, f'P{i+1}', (x+10, y+10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
         
-        # Add quality assessment overlay
-        overlay_height = 150
+        # Add quality assessment overlay - bigger and more visible
+        overlay_height = 200
         overlay = np.zeros((overlay_height, vis_image.shape[1], 3), dtype=np.uint8)
-        overlay.fill(50)  # Dark gray background
+        overlay.fill(40)  # Dark background for better contrast
         
-        # Quality text
+        # Main quality result - LARGE and prominent
         quality_color = (0, 255, 0) if results['overall_quality'] == 'GOOD' else (0, 0, 255)
-        cv2.putText(overlay, f"Overall Quality: {results['overall_quality']}", 
-                   (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, quality_color, 2)
+        quality_text = f"QUALITY: {results['overall_quality']}"
         
-        # Component analysis
+        # Calculate text size for centering
+        (text_width, text_height), _ = cv2.getTextSize(quality_text, cv2.FONT_HERSHEY_SIMPLEX, 2.0, 4)
+        text_x = (vis_image.shape[1] - text_width) // 2
+        
+        # Add background rectangle for better visibility
+        cv2.rectangle(overlay, (text_x - 20, 15), (text_x + text_width + 20, 15 + text_height + 20), 
+                     (0, 0, 0), -1)  # Black background
+        cv2.rectangle(overlay, (text_x - 20, 15), (text_x + text_width + 20, 15 + text_height + 20), 
+                     quality_color, 3)  # Colored border
+        
+        # Main quality text - LARGE
+        cv2.putText(overlay, quality_text, (text_x, 15 + text_height), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 2.0, quality_color, 4)
+        
+        # Component analysis - medium size
         hole_color = (0, 255, 0) if results['hole_good'] else (0, 0, 255)
         text_color = (0, 255, 0) if results['text_color_good'] else (0, 0, 255)
         knob_color = (0, 255, 0) if results['knob_size_good'] else (0, 0, 255)
         
-        cv2.putText(overlay, f"Hole: {'GOOD' if results['hole_good'] else 'BAD'}", 
-                   (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, hole_color, 2)
-        cv2.putText(overlay, f"Text: {'GOOD' if results['text_color_good'] else 'BAD'}", 
-                   (150, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 2)
-        cv2.putText(overlay, f"Knob: {'GOOD' if results['knob_size_good'] else 'BAD'}", 
-                   (290, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, knob_color, 2)
+        y_offset = 80
+        cv2.putText(overlay, f"HOLE: {'GOOD' if results['hole_good'] else 'BAD'}", 
+                   (20, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 1.0, hole_color, 3)
+        cv2.putText(overlay, f"TEXT: {'GOOD' if results['text_color_good'] else 'BAD'}", 
+                   (220, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 1.0, text_color, 3)
+        cv2.putText(overlay, f"KNOB: {'GOOD' if results['knob_size_good'] else 'BAD'}", 
+                   (420, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 1.0, knob_color, 3)
         
-        # Detection count
+        # Detection count and confidence
+        y_offset = 120
         cv2.putText(overlay, f"Objects Detected: {len(detections['boxes'])}", 
-                   (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                   (20, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        
+        # Show confidence scores
+        if len(detections['scores']) > 0:
+            avg_confidence = np.mean(detections['scores'])
+            cv2.putText(overlay, f"Avg Confidence: {avg_confidence:.2f}", 
+                       (300, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        
+        # Add analysis details for text (if bad)
+        if not results['text_color_good']:
+            y_offset = 150
+            analysis = results['analysis_details']['text_analysis']
+            status_parts = analysis['status'].split(', ')
+            detail_text = f"Text Issue: {status_parts[0] if status_parts else 'Unknown'}"
+            cv2.putText(overlay, detail_text, 
+                       (20, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
         
         # Combine original image with overlay
         result_image = np.vstack([vis_image, overlay])

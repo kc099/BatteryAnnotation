@@ -198,7 +198,7 @@ class BatteryInference:
         )
         relaxed_white_ratio = np.sum(relaxed_white_mask) / len(text_pixels)
         
-        # Combined decision: any method indicates white text
+        # Improved decision logic: require stronger evidence for good text
         min_ratio_threshold = 0.008  # 0.8% instead of 1%
         
         hsv_sufficient = white_hsv_ratio >= min_ratio_threshold
@@ -206,19 +206,47 @@ class BatteryInference:
         relaxed_sufficient = relaxed_white_ratio >= min_ratio_threshold
         
         # Contrast check (still important)
-        contrast_sufficient = brightness_std >= 15  # Slightly lower threshold
+        contrast_sufficient = brightness_std >= 18  # Slightly higher threshold
         
-        # Decision: (any white detection method) AND contrast
-        white_detected = hsv_sufficient or bright_sufficient or relaxed_sufficient
-        is_good = white_detected and contrast_sufficient
+        # Improved decision logic:
+        # 1. HSV method is most reliable for shadows - if it works well, trust it
+        # 2. Otherwise, require at least 2 methods to agree OR very high scores
+        
+        hsv_strong = white_hsv_ratio >= 0.15  # Strong HSV detection (15%+)
+        bright_strong = bright_ratio >= 0.20   # Strong brightness detection (20%+)
+        
+        # Good text requires:
+        # Option 1: Strong HSV detection (works in shadows) + contrast
+        # Option 2: At least 2 methods agree + contrast  
+        # Option 3: Very strong brightness detection + contrast
+        
+        methods_agreeing = sum([hsv_sufficient, bright_sufficient, relaxed_sufficient])
+        
+        condition1 = hsv_strong and contrast_sufficient  # Strong HSV + contrast
+        condition2 = (methods_agreeing >= 2) and contrast_sufficient  # 2+ methods + contrast
+        condition3 = bright_strong and contrast_sufficient  # Very strong brightness + contrast
+        
+        is_good = condition1 or condition2 or condition3
         
         # Return the best score from all methods
         best_score = max(white_hsv_ratio, bright_ratio, relaxed_white_ratio)
         
+        # Create detailed status with decision reasoning
         status = f"HSV: {white_hsv_ratio:.3f} ({'✓' if hsv_sufficient else '✗'}), "
         status += f"Bright: {bright_ratio:.3f} ({'✓' if bright_sufficient else '✗'}), "
         status += f"Relaxed: {relaxed_white_ratio:.3f} ({'✓' if relaxed_sufficient else '✗'}), "
         status += f"Contrast: {brightness_std:.1f} ({'✓' if contrast_sufficient else '✗'})"
+        
+        # Add decision reasoning
+        if is_good:
+            if condition1:
+                status += " [Strong HSV]"
+            elif condition2:
+                status += f" [{methods_agreeing} methods agree]"
+            elif condition3:
+                status += " [Strong brightness]"
+        else:
+            status += " [Insufficient evidence]"
         
         return is_good, best_score, status
     
