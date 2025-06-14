@@ -101,14 +101,17 @@ class BatteryInference:
         return 0.0
     
     def analyze_hole_quality(self, hole_mask):
-        """Analyze hole quality based on eccentricity"""
+        """Analyze hole quality based on eccentricity - data-driven threshold"""
         if hole_mask.sum() == 0:
             return False, 0.0, "No hole detected"
         
         eccentricity = self.calculate_mask_eccentricity(hole_mask)
-        is_good = eccentricity < 0.4
         
-        status = f"Eccentricity: {eccentricity:.3f} ({'GOOD' if is_good else 'BAD'} - threshold: 0.4)"
+        # Data-driven threshold - can be updated based on analysis
+        hole_threshold = 0.75
+        is_good = eccentricity < hole_threshold
+        
+        status = f"Eccentricity: {eccentricity:.3f} ({'GOOD' if is_good else 'BAD'} - threshold: {hole_threshold})"
         return is_good, eccentricity, status
     
     def analyze_knob_sizes(self, plus_mask, minus_mask, hole_mask):
@@ -145,16 +148,18 @@ class BatteryInference:
         area_ratio = plus_area / minus_area if minus_area > 0 else 0
         
         # Both constraints must be met
-        size_constraint_ok = area_ratio > 1.2
+        # Data-driven threshold - can be updated based on analysis
+        knob_threshold = 1.15  # Consistent threshold value
+        size_constraint_ok = area_ratio > knob_threshold
         is_good = spatial_constraint_ok and size_constraint_ok
         
-        status = f"Area ratio: {area_ratio:.3f} ({'GOOD' if size_constraint_ok else 'BAD'} - threshold: 1.2), "
+        status = f"Area ratio: {area_ratio:.3f} ({'GOOD' if size_constraint_ok else 'BAD'} - threshold: {knob_threshold}), "
         status += f"Spatial: {'GOOD' if spatial_constraint_ok else 'BAD'} (minus closer to hole)"
         
         return is_good, area_ratio, status
     
     def analyze_text_color(self, image, text_mask):
-        """Analyze text color by examining RGB pixel distributions in masked region - improved for shadows"""
+        """Analyze text color using simple white ratio threshold based on data analysis"""
         if text_mask.sum() == 0:
             return False, 0.0, "No text mask detected"
         
@@ -169,86 +174,26 @@ class BatteryInference:
         if len(text_pixels) == 0:
             return False, 0.0, "No text pixels found"
         
-        # Method 1: HSV-based white detection (better for shadows)
-        text_pixels_hsv = cv2.cvtColor(text_pixels.reshape(1, -1, 3), cv2.COLOR_RGB2HSV).reshape(-1, 3)
-        
-        # White/light text: low saturation + reasonable value (works in shadows)
-        low_saturation = text_pixels_hsv[:, 1] < 60   # Saturation < 60
-        reasonable_value = text_pixels_hsv[:, 2] > 80  # Value > 80 (not too dark)
-        
-        white_hsv_mask = low_saturation & reasonable_value
-        white_hsv_ratio = np.sum(white_hsv_mask) / len(text_pixels)
-        
-        # Method 2: Adaptive brightness threshold
-        brightness = 0.299 * text_pixels[:, 0] + 0.587 * text_pixels[:, 1] + 0.114 * text_pixels[:, 2]
-        brightness_mean = np.mean(brightness)
-        brightness_std = np.std(brightness)
-        
-        # Look for pixels significantly brighter than average
-        adaptive_threshold = max(brightness_mean + 0.5 * brightness_std, 120)  # At least 120
-        bright_mask = brightness > adaptive_threshold
-        bright_ratio = np.sum(bright_mask) / len(text_pixels)
-        
-        # Method 3: Relaxed RGB threshold for shadowed areas
-        relaxed_threshold = 160  # Lower than original 200
-        relaxed_white_mask = (
-            (text_pixels[:, 0] > relaxed_threshold) &
-            (text_pixels[:, 1] > relaxed_threshold) &
-            (text_pixels[:, 2] > relaxed_threshold)
+        # Simple white detection: RGB values all above 200 (original method)
+        white_threshold = 200
+        white_mask = (
+            (text_pixels[:, 0] > white_threshold) &
+            (text_pixels[:, 1] > white_threshold) &
+            (text_pixels[:, 2] > white_threshold)
         )
-        relaxed_white_ratio = np.sum(relaxed_white_mask) / len(text_pixels)
+        white_ratio = np.sum(white_mask) / len(text_pixels)
         
-        # Improved decision logic: require stronger evidence for good text
-        min_ratio_threshold = 0.008  # 0.8% instead of 1%
+        # Data-driven threshold: 0.1 based on analysis of extracted_frames_9183
+        threshold = 0.1
+        is_good = white_ratio >= threshold
         
-        hsv_sufficient = white_hsv_ratio >= min_ratio_threshold
-        bright_sufficient = bright_ratio >= min_ratio_threshold
-        relaxed_sufficient = relaxed_white_ratio >= min_ratio_threshold
+        # Calculate contrast for additional info
+        brightness = 0.299 * text_pixels[:, 0] + 0.587 * text_pixels[:, 1] + 0.114 * text_pixels[:, 2]
+        contrast = np.std(brightness)
         
-        # Contrast check (still important)
-        contrast_sufficient = brightness_std >= 18  # Slightly higher threshold
+        status = f"White ratio: {white_ratio:.3f} ({'GOOD' if is_good else 'BAD'} - threshold: {threshold}), Contrast: {contrast:.1f}"
         
-        # Improved decision logic:
-        # 1. HSV method is most reliable for shadows - if it works well, trust it
-        # 2. Otherwise, require at least 2 methods to agree OR very high scores
-        
-        hsv_strong = white_hsv_ratio >= 0.15  # Strong HSV detection (15%+)
-        bright_strong = bright_ratio >= 0.20   # Strong brightness detection (20%+)
-        
-        # Good text requires:
-        # Option 1: Strong HSV detection (works in shadows) + contrast
-        # Option 2: At least 2 methods agree + contrast  
-        # Option 3: Very strong brightness detection + contrast
-        
-        methods_agreeing = sum([hsv_sufficient, bright_sufficient, relaxed_sufficient])
-        
-        condition1 = hsv_strong and contrast_sufficient  # Strong HSV + contrast
-        condition2 = (methods_agreeing >= 2) and contrast_sufficient  # 2+ methods + contrast
-        condition3 = bright_strong and contrast_sufficient  # Very strong brightness + contrast
-        
-        is_good = condition1 or condition2 or condition3
-        
-        # Return the best score from all methods
-        best_score = max(white_hsv_ratio, bright_ratio, relaxed_white_ratio)
-        
-        # Create detailed status with decision reasoning
-        status = f"HSV: {white_hsv_ratio:.3f} ({'✓' if hsv_sufficient else '✗'}), "
-        status += f"Bright: {bright_ratio:.3f} ({'✓' if bright_sufficient else '✗'}), "
-        status += f"Relaxed: {relaxed_white_ratio:.3f} ({'✓' if relaxed_sufficient else '✗'}), "
-        status += f"Contrast: {brightness_std:.1f} ({'✓' if contrast_sufficient else '✗'})"
-        
-        # Add decision reasoning
-        if is_good:
-            if condition1:
-                status += " [Strong HSV]"
-            elif condition2:
-                status += f" [{methods_agreeing} methods agree]"
-            elif condition3:
-                status += " [Strong brightness]"
-        else:
-            status += " [Insufficient evidence]"
-        
-        return is_good, best_score, status
+        return is_good, white_ratio, status
     
     def postprocess_predictions(self, outputs, orig_image, orig_size, conf_threshold=0.5):
         """Convert model outputs to interpretable results using mask-based analysis"""
@@ -444,7 +389,7 @@ Overall Quality: {results['overall_quality']}
         print(f"🔍 Found {len(image_files)} images in {data_dir}")
         
         results_list = []
-        output_dir = data_dir / "inference_results" if save_results else None
+        output_dir = data_dir / "inference_results_new" if save_results else None
         
         if save_results:
             output_dir.mkdir(exist_ok=True)
