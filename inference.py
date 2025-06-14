@@ -487,6 +487,18 @@ Overall Quality: {results['overall_quality']}
                         json_results['perspective_points'] = results['perspective_points'].tolist()
                         del json_results['detections']['masks']  # Too large for JSON
                         
+                        # Convert numpy booleans to Python booleans for JSON serialization
+                        json_results['hole_good'] = bool(results['hole_good'])
+                        json_results['text_color_good'] = bool(results['text_color_good'])
+                        json_results['knob_size_good'] = bool(results['knob_size_good'])
+                        
+                        # Convert nested analysis details
+                        for analysis_type in ['hole_analysis', 'knob_analysis', 'text_analysis']:
+                            if 'good' in json_results['analysis_details'][analysis_type]:
+                                json_results['analysis_details'][analysis_type]['good'] = bool(
+                                    json_results['analysis_details'][analysis_type]['good']
+                                )
+                        
                         json.dump(json_results, f, indent=2)
                 
                 # Print summary
