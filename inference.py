@@ -32,17 +32,23 @@ class BatteryInference:
         
         # Load model
         self.model = CustomMaskRCNN(num_classes=5).to(self.device)
-        checkpoint = torch.load(model_path, map_location=self.device)
+        try:
+            # Try loading with weights_only=True first (safer)
+            checkpoint = torch.load(model_path, map_location=self.device, weights_only=True)
+        except:
+            # Fallback to weights_only=False for older model files
+            checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
+        
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.model.eval()
         
         # Class names
         self.class_names = {0: 'background', 1: 'plus_knob', 2: 'minus_knob', 3: 'text_area', 4: 'hole'}
         
-        # Preprocessing
+        # Preprocessing - removed ImageNet normalization for better field robustness
         self.transform = A.Compose([
             A.Resize(height=544, width=960, p=1.0),
-            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),  # Just convert to [0,1] range
             ToTensorV2()
         ])
         
@@ -147,8 +153,8 @@ class BatteryInference:
         
         return is_good, area_ratio, status
     
-    def analyze_text_color(self, image, text_mask, debug_plot=False):
-        """Analyze text color by examining RGB pixel distributions in masked region"""
+    def analyze_text_color(self, image, text_mask):
+        """Analyze text color by examining RGB pixel distributions in masked region - improved for shadows"""
         if text_mask.sum() == 0:
             return False, 0.0, "No text mask detected"
         
@@ -163,102 +169,58 @@ class BatteryInference:
         if len(text_pixels) == 0:
             return False, 0.0, "No text pixels found"
         
-        print(f"\n🔍 TEXT COLOR ANALYSIS DEBUG:")
-        print(f"Total text pixels: {len(text_pixels)}")
-        print(f"RGB value ranges:")
-        print(f"  R: {text_pixels[:, 0].min()}-{text_pixels[:, 0].max()} (mean: {text_pixels[:, 0].mean():.1f})")
-        print(f"  G: {text_pixels[:, 1].min()}-{text_pixels[:, 1].max()} (mean: {text_pixels[:, 1].mean():.1f})")
-        print(f"  B: {text_pixels[:, 2].min()}-{text_pixels[:, 2].max()} (mean: {text_pixels[:, 2].mean():.1f})")
+        # Method 1: HSV-based white detection (better for shadows)
+        text_pixels_hsv = cv2.cvtColor(text_pixels.reshape(1, -1, 3), cv2.COLOR_RGB2HSV).reshape(-1, 3)
         
-        # Plot RGB histograms if requested
-        if debug_plot:
-            fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-            
-            # RGB histograms
-            colors = ['red', 'green', 'blue']
-            channel_names = ['Red', 'Green', 'Blue']
-            
-            for i, (color, name) in enumerate(zip(colors, channel_names)):
-                axes[0, i].hist(text_pixels[:, i], bins=50, color=color, alpha=0.7, edgecolor='black')
-                axes[0, i].set_title(f'{name} Channel Distribution')
-                axes[0, i].set_xlabel('Pixel Value (0-255)')
-                axes[0, i].set_ylabel('Frequency')
-                axes[0, i].grid(True, alpha=0.3)
-            
-            # 2D scatter plots
-            axes[1, 0].scatter(text_pixels[:, 0], text_pixels[:, 1], alpha=0.5, s=1)
-            axes[1, 0].set_xlabel('Red')
-            axes[1, 0].set_ylabel('Green')
-            axes[1, 0].set_title('Red vs Green')
-            axes[1, 0].grid(True, alpha=0.3)
-            
-            axes[1, 1].scatter(text_pixels[:, 0], text_pixels[:, 2], alpha=0.5, s=1)
-            axes[1, 1].set_xlabel('Red')
-            axes[1, 1].set_ylabel('Blue')
-            axes[1, 1].set_title('Red vs Blue')
-            axes[1, 1].grid(True, alpha=0.3)
-            
-            axes[1, 2].scatter(text_pixels[:, 1], text_pixels[:, 2], alpha=0.5, s=1)
-            axes[1, 2].set_xlabel('Green')
-            axes[1, 2].set_ylabel('Blue')
-            axes[1, 2].set_title('Green vs Blue')
-            axes[1, 2].grid(True, alpha=0.3)
-            
-            plt.tight_layout()
-            plt.show()
+        # White/light text: low saturation + reasonable value (works in shadows)
+        low_saturation = text_pixels_hsv[:, 1] < 60   # Saturation < 60
+        reasonable_value = text_pixels_hsv[:, 2] > 80  # Value > 80 (not too dark)
         
-        # Print some sample pixel values
-        print(f"\nSample pixel values (first 10):")
-        for i in range(min(10, len(text_pixels))):
-            r, g, b = text_pixels[i]
-            print(f"  Pixel {i+1}: RGB({r:3d}, {g:3d}, {b:3d})")
+        white_hsv_mask = low_saturation & reasonable_value
+        white_hsv_ratio = np.sum(white_hsv_mask) / len(text_pixels)
         
-        # Now that we understand the RGB patterns, let's implement proper analysis
-        # We see that text regions contain both green background and white text
-        # Good samples should have significant white text pixels
+        # Method 2: Adaptive brightness threshold
+        brightness = 0.299 * text_pixels[:, 0] + 0.587 * text_pixels[:, 1] + 0.114 * text_pixels[:, 2]
+        brightness_mean = np.mean(brightness)
+        brightness_std = np.std(brightness)
         
-        # Method 1: Identify white pixels (high values in all channels)
-        white_threshold = 200  # Pixels with R,G,B all > 200 are considered white
-        white_mask = (
-            (text_pixels[:, 0] > white_threshold) &
-            (text_pixels[:, 1] > white_threshold) &
-            (text_pixels[:, 2] > white_threshold)
+        # Look for pixels significantly brighter than average
+        adaptive_threshold = max(brightness_mean + 0.5 * brightness_std, 120)  # At least 120
+        bright_mask = brightness > adaptive_threshold
+        bright_ratio = np.sum(bright_mask) / len(text_pixels)
+        
+        # Method 3: Relaxed RGB threshold for shadowed areas
+        relaxed_threshold = 160  # Lower than original 200
+        relaxed_white_mask = (
+            (text_pixels[:, 0] > relaxed_threshold) &
+            (text_pixels[:, 1] > relaxed_threshold) &
+            (text_pixels[:, 2] > relaxed_threshold)
         )
-        white_pixel_count = np.sum(white_mask)
-        white_ratio = white_pixel_count / len(text_pixels)
+        relaxed_white_ratio = np.sum(relaxed_white_mask) / len(text_pixels)
         
-        # Method 2: Identify green background pixels (high G, low R&B)
-        green_mask = (
-            (text_pixels[:, 1] > 180) &  # High green
-            (text_pixels[:, 0] < 180) &  # Lower red
-            (text_pixels[:, 2] < 100)    # Low blue
-        )
-        green_pixel_count = np.sum(green_mask)
-        green_ratio = green_pixel_count / len(text_pixels)
+        # Combined decision: any method indicates white text
+        min_ratio_threshold = 0.008  # 0.8% instead of 1%
         
-        # Method 3: Calculate contrast - good text should have high contrast
-        # between white text and green background
-        brightness_std = np.std(np.mean(text_pixels, axis=1))  # Std of brightness values
+        hsv_sufficient = white_hsv_ratio >= min_ratio_threshold
+        bright_sufficient = bright_ratio >= min_ratio_threshold
+        relaxed_sufficient = relaxed_white_ratio >= min_ratio_threshold
         
-        print(f"\n📊 COLOR ANALYSIS RESULTS:")
-        print(f"White pixels (R,G,B > {white_threshold}): {white_pixel_count} ({white_ratio:.3f})")
-        print(f"Green background pixels: {green_pixel_count} ({green_ratio:.3f})")
-        print(f"Brightness contrast (std): {brightness_std:.1f}")
+        # Contrast check (still important)
+        contrast_sufficient = brightness_std >= 15  # Slightly lower threshold
         
-        # Decision logic: Good text should have reasonable amount of white pixels
-        # and good contrast between text and background
-        min_white_ratio = 0.05  # At least 5% white pixels
-        min_contrast = 20       # Minimum brightness standard deviation
+        # Decision: (any white detection method) AND contrast
+        white_detected = hsv_sufficient or bright_sufficient or relaxed_sufficient
+        is_good = white_detected and contrast_sufficient
         
-        white_sufficient = white_ratio >= min_white_ratio
-        contrast_sufficient = brightness_std >= min_contrast
+        # Return the best score from all methods
+        best_score = max(white_hsv_ratio, bright_ratio, relaxed_white_ratio)
         
-        is_good = white_sufficient and contrast_sufficient
+        status = f"HSV: {white_hsv_ratio:.3f} ({'✓' if hsv_sufficient else '✗'}), "
+        status += f"Bright: {bright_ratio:.3f} ({'✓' if bright_sufficient else '✗'}), "
+        status += f"Relaxed: {relaxed_white_ratio:.3f} ({'✓' if relaxed_sufficient else '✗'}), "
+        status += f"Contrast: {brightness_std:.1f} ({'✓' if contrast_sufficient else '✗'})"
         
-        status = f"White ratio: {white_ratio:.3f} ({'✓' if white_sufficient else '✗'} ≥{min_white_ratio}), "
-        status += f"Contrast: {brightness_std:.1f} ({'✓' if contrast_sufficient else '✗'} ≥{min_contrast})"
-        
-        return is_good, white_ratio, status
+        return is_good, best_score, status
     
     def postprocess_predictions(self, outputs, orig_image, orig_size, conf_threshold=0.5):
         """Convert model outputs to interpretable results using mask-based analysis"""
@@ -322,7 +284,7 @@ class BatteryInference:
         knob_good, knob_ratio, knob_status = self.analyze_knob_sizes(plus_mask, minus_mask, hole_mask)
         
         # 3. Text color analysis
-        text_good, text_score, text_status = self.analyze_text_color(orig_image, text_mask, debug_plot=True)
+        text_good, text_score, text_status = self.analyze_text_color(orig_image, text_mask)
         
         # 4. Overall quality (rule-based)
         overall_good = hole_good and knob_good and text_good

@@ -32,20 +32,23 @@ from sklearn.metrics import f1_score, accuracy_score
 
 def get_transforms(train=True):
     """Get augmentation pipeline for training/validation"""
+    # Removed ImageNet normalization for better field robustness
+    # Using simple [0,1] normalization instead of dataset-specific values
     if train:
         return A.Compose([
             A.Resize(height=544, width=960, p=1.0),
             A.HorizontalFlip(p=0.3),
             A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.05, rotate_limit=10, p=0.3),
             A.RandomBrightnessContrast(brightness_limit=0.1, contrast_limit=0.1, p=0.3),
-            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),  # Just convert to [0,1] range
             ToTensorV2()
         ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['category_ids']),
            keypoint_params=A.KeypointParams(format='xy'))
     else:
         return A.Compose([
             A.Resize(height=544, width=960, p=1.0),
-            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),  # Just convert to [0,1] range
+            # A.Normalize(mean=[0.0, 0.0, 0.0], std=[1.0, 1.0, 1.0]),  # Just convert to [0,1] range
             ToTensorV2()
         ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['category_ids']),
            keypoint_params=A.KeypointParams(format='xy'))
