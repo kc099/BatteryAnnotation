@@ -95,6 +95,10 @@ if __name__ == '__main__':
         project_base / 'extracted_frames_9182',
         project_base / 'extracted_frames_9183',
         project_base / 'extracted_frames_9198',
+        project_base / 'extracted_frames_9213',
+        project_base / 'extracted_frames_9219',
+        project_base / 'extracted_frames_9215',
+        
     ]
     
     output_directory = project_base / 'data'

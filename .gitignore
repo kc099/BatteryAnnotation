@@ -4,3 +4,4 @@ labelled_frames/
 *.MOV
 logs/
 __pycache__/
+*.pth

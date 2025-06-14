@@ -108,8 +108,8 @@ class MaskRCNNDataset(Dataset):
         overall_quality = self.quality_map.get(ann.get('overall_quality', 'UNKNOWN'), 2)
         overall_quality = torch.tensor(overall_quality, dtype=torch.long)
         text_color = torch.tensor(float(ann.get('text_color_present', False)), dtype=torch.float32)
-        plus_area = ann.get('plus_knob_area', 0)
-        minus_area = ann.get('minus_knob_area', 0)
+        plus_area = ann.get('plus_knob_area', 0) or 0  # Handle None case
+        minus_area = ann.get('minus_knob_area', 0) or 0  # Handle None case
         knob_size = torch.tensor(float(plus_area > minus_area), dtype=torch.float32)
 
         # Apply transforms BEFORE creating target dict

@@ -121,17 +121,49 @@ def evaluate_model(model, data_loader, device):
                 total_losses[key] += value.item()
             
             # Collect predictions for metrics
-            quality_preds = torch.argmax(outputs['overall_quality'], dim=1)
-            all_quality_preds.extend(quality_preds.cpu().numpy())
-            all_quality_targets.extend(batch_targets['overall_quality'].cpu().numpy())
+            # Overall quality is now rule-based (0=good, 1=bad)
+            quality_preds = outputs['overall_quality'].cpu().numpy()
+            if quality_preds.ndim == 0:
+                quality_preds = [quality_preds.item()]
+            else:
+                quality_preds = quality_preds.tolist()
+            all_quality_preds.extend(quality_preds)
             
-            text_preds = (torch.sigmoid(outputs['text_color']) > 0.5).float().squeeze()
-            all_text_preds.extend(text_preds.cpu().numpy())
-            all_text_targets.extend(batch_targets['text_color'].cpu().numpy())
+            quality_targets = batch_targets['overall_quality'].cpu().numpy()
+            if quality_targets.ndim == 0:
+                quality_targets = [quality_targets.item()]
+            else:
+                quality_targets = quality_targets.tolist()
+            all_quality_targets.extend(quality_targets)
             
-            knob_preds = (torch.sigmoid(outputs['knob_size']) > 0.5).float().squeeze()
-            all_knob_preds.extend(knob_preds.cpu().numpy())
-            all_knob_targets.extend(batch_targets['knob_size'].cpu().numpy())
+            # Text color and knob size are now probabilities (0-1)
+            text_preds = (outputs['text_color'] > 0.5).float().squeeze()
+            if text_preds.ndim == 0:
+                text_preds = [text_preds.item()]
+            else:
+                text_preds = text_preds.tolist()
+            all_text_preds.extend(text_preds)
+            
+            text_targets = batch_targets['text_color'].cpu().numpy()
+            if text_targets.ndim == 0:
+                text_targets = [text_targets.item()]
+            else:
+                text_targets = text_targets.tolist()
+            all_text_targets.extend(text_targets)
+            
+            knob_preds = (outputs['knob_size'] > 0.5).float().squeeze()
+            if knob_preds.ndim == 0:
+                knob_preds = [knob_preds.item()]
+            else:
+                knob_preds = knob_preds.tolist()
+            all_knob_preds.extend(knob_preds)
+            
+            knob_targets = batch_targets['knob_size'].cpu().numpy()
+            if knob_targets.ndim == 0:
+                knob_targets = [knob_targets.item()]
+            else:
+                knob_targets = knob_targets.tolist()
+            all_knob_targets.extend(knob_targets)
             
             # Detection metrics (simplified)
             maskrcnn_outputs = outputs['maskrcnn']
@@ -303,3 +335,16 @@ def main():
 if __name__ == '__main__':
     torch.set_float32_matmul_precision('medium')
     main() 
+
+# # 1. Prepare dataset (when adding new data)
+# python BatteryAnnotation/prepare_dataset.py
+
+# # 2. Train model
+# python BatteryAnnotation/train.py --epochs 50 --batch_size 4
+
+# # 3. Run inference
+# python BatteryAnnotation/inference.py --model best_custom_maskrcnn.pth --data_dir extracted_frames_9213 --save_results
+
+# # 4. Test components (optional)
+# python BatteryAnnotation/test_custom_maskrcnn.py
+# python BatteryAnnotation/test_training.py
