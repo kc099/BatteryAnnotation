@@ -6,6 +6,10 @@ Usage:
     python train.py --epochs 50 --batch_size 4
 """
 
+import os
+# Fix OpenMP duplicate library issue
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+
 import argparse
 import torch
 import torch.nn as nn

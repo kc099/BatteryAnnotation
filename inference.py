@@ -7,6 +7,10 @@ Usage:
     python inference.py --model best_custom_maskrcnn.pth --data_dir data/test --save_results
 """
 
+import os
+# Fix OpenMP duplicate library issue
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+
 import argparse
 import torch
 import cv2
@@ -112,6 +116,9 @@ class BatteryInference:
         with torch.no_grad():
             # Preprocess
             tensor_image, orig_image, orig_size = self.preprocess_image(image_path)
+            
+            # Remove batch dimension for Mask R-CNN - it expects list of [C, H, W] tensors
+            tensor_image = tensor_image.squeeze(0)  # [1, 3, H, W] -> [3, H, W]
             
             # Inference
             outputs = self.model([tensor_image], None)

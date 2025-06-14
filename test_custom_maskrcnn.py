@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 
+import os
+# Fix OpenMP duplicate library issue
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+
 import torch
 import numpy as np
 from custom_maskrcnn import CustomMaskRCNN

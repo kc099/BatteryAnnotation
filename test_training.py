@@ -3,6 +3,10 @@
 Test the training pipeline without full training
 """
 
+import os
+# Fix OpenMP duplicate library issue
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+
 import torch
 import os
 from pathlib import Path
