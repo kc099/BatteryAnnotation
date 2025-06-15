@@ -159,7 +159,7 @@ class BatteryInference:
         return is_good, area_ratio, status
     
     def analyze_text_color(self, image, text_mask):
-        """Analyze text color using simple white ratio threshold based on data analysis"""
+        """Analyze text color using HSV-based white detection with data-driven threshold"""
         if text_mask.sum() == 0:
             return False, 0.0, "No text mask detected"
         
@@ -174,14 +174,15 @@ class BatteryInference:
         if len(text_pixels) == 0:
             return False, 0.0, "No text pixels found"
         
-        # Simple white detection: RGB values all above 200 (original method)
-        white_threshold = 200
-        white_mask = (
-            (text_pixels[:, 0] > white_threshold) &
-            (text_pixels[:, 1] > white_threshold) &
-            (text_pixels[:, 2] > white_threshold)
-        )
-        white_ratio = np.sum(white_mask) / len(text_pixels)
+        # HSV-based white detection (this was working correctly before)
+        text_pixels_hsv = cv2.cvtColor(text_pixels.reshape(1, -1, 3), cv2.COLOR_RGB2HSV).reshape(-1, 3)
+        
+        # White/light text: low saturation + reasonable value (works in shadows)
+        low_saturation = text_pixels_hsv[:, 1] < 60   # Saturation < 60
+        reasonable_value = text_pixels_hsv[:, 2] > 80  # Value > 80 (not too dark)
+        
+        white_hsv_mask = low_saturation & reasonable_value
+        white_ratio = np.sum(white_hsv_mask) / len(text_pixels)
         
         # Data-driven threshold: 0.1 based on analysis of extracted_frames_9183
         threshold = 0.1
