@@ -31,7 +31,7 @@ total_loss = maskrcnn_loss + 0.1*perspective_loss + quality_loss + 0.5*text_loss
 
 ```
 BatteryAnnotation/
-├── custom_maskrcnn.py      # Main model definition
+├── custom_maskrcnn.py       # Main model definition
 ├── loss.py                 # Combined loss function
 ├── train.py                # Training script with metrics
 ├── inference.py            # Comprehensive inference script

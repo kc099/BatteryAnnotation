@@ -168,6 +168,21 @@ class CustomMaskRCNN(nn.Module):
                 labels = target['labels']
                 masks = target['masks']
                 
+                # Debug: Print shapes to understand the issue
+                print(f"Debug - boxes shape: {boxes.shape}, labels shape: {labels.shape}, masks shape: {masks.shape}")
+                
+                # Ensure labels is 1D
+                if labels.dim() > 1:
+                    labels = labels.squeeze()
+                
+                # Ensure labels and boxes have the same length
+                if len(labels) != len(boxes):
+                    min_len = min(len(labels), len(boxes))
+                    labels = labels[:min_len]
+                    boxes = boxes[:min_len]
+                    masks = masks[:min_len]
+                    print(f"Fixed length mismatch - using first {min_len} elements")
+                
                 # Separate by class
                 plus_mask = labels == 1
                 minus_mask = labels == 2
@@ -196,6 +211,17 @@ class CustomMaskRCNN(nn.Module):
                 boxes = boxes[keep]
                 labels = labels[keep]
                 masks = masks[keep]
+                
+                # Ensure labels is 1D
+                if labels.dim() > 1:
+                    labels = labels.squeeze()
+                
+                # Ensure labels and boxes have the same length
+                if len(labels) != len(boxes):
+                    min_len = min(len(labels), len(boxes))
+                    labels = labels[:min_len]
+                    boxes = boxes[:min_len]
+                    masks = masks[:min_len]
                 
                 # Separate by class
                 plus_mask = labels == 1

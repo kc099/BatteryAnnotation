@@ -310,7 +310,7 @@ def train_model(train_dir, val_dir, epochs=50, batch_size=4, lr=1e-4, num_worker
 
 def main():
     parser = argparse.ArgumentParser(description='Train Custom Mask R-CNN for Battery Quality')
-    parser.add_argument('--data_dir', type=str, default='data', help='Base data directory')
+    parser.add_argument('--data_dir', type=str, default='data_v1', help='Base data directory')
     parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
     parser.add_argument('--batch_size', type=int, default=4, help='Batch size')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')

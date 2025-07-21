@@ -1,0 +1,22 @@
+
+
+
+All recording stopped
+Pre-Post Trigger capture system initialized
+Pre-trigger recording started - Pre-trigger: 3.0s, Post-trigger: 2.0s, FPS: 30
+[13:20:35.825] [SIGNAL] Received 8 bytes: 010300000001840A
+[13:20:35.826] [SIGNAL] Buffer now contains 8 bytes total
+[13:20:35.826] [SIGNAL] Processing potential 8-byte frame: 010300000001840A
+[13:20:35.826] [SIGNAL] Frame analysis: Slave ID: 1 (expected: 1), Function: 0x03
+[13:20:35.826] [SIGNAL] VALID MODBUS FRAME DETECTED - Slave ID: 1, Function: 0x03
+[13:20:35.826] [SIGNAL]   Complete frame: 010300000001840A
+24V Signal received - Processing...
+24V Signal received at 1752738635.8268228
+Post-trigger recording started
+[13:20:35.828] [SIGNAL] Valid frame processed, 0 bytes remaining in buffer
+[mpjpeg @ 0x25b67f50] Expected boundary '--' not found, instead found a line of 71 bytes
+[mpjpeg @ 0x25b67f50] Expected boundary '--' not found, instead found a line of 50 bytes
+Failed to capture frame or empty frame
+Assertion (unsigned)pkt->size <= 0x7fffffff - 64 failed at libavcodec/avpacket.c:123
+Aborted (core dumped)
+

@@ -19,8 +19,6 @@ import threading
 import torch
 import time
 import os
-from pathlib import Path
-import datetime
 
 # Import our inference class
 from inference import BatteryInference
@@ -30,8 +28,7 @@ from signal_handler import SignalHandler
 # Import capture systems
 from video_buffer_capture import VideoBufferCapture
 from pre_post_trigger_capture import PrePostTriggerCapture
-SAVE_DIR = Path.home() / "Amaron" / "BatteryAnnotation" / "captured_frames"
-SAVE_DIR.mkdir(parents=True, exist_ok=True)
+
 class SimpleUploadViewer:
     def __init__(self, root):
         self.root = root
@@ -71,7 +68,7 @@ class SimpleUploadViewer:
         self.setup_ui()
 
         # ── AUTO-LOAD DEFAULT MODEL ──────────────────────────────────────────
-        DEFAULT_MODEL_PATH = "./best_custom_maskrcnn.pth"
+        DEFAULT_MODEL_PATH = "/home/nvidia/Amaron/BatteryAnnotation/best_custom_maskrcnn.pth"
         self._auto_load_default_model(DEFAULT_MODEL_PATH)
     
     def setup_ui(self):
@@ -286,7 +283,7 @@ class SimpleUploadViewer:
         self.upload_button.config(state="normal")
         self.start_stream_btn.config(state="normal")  # Enable streaming when model is loaded
         self.auto_capture_check.config(state="normal")  # Enable auto-capture when model is loaded
-        #messagebox.showinfo("Success", "Model loaded successfully!")
+        messagebox.showinfo("Success", "Model loaded successfully!")
     
     def on_capture_mode_changed(self, event=None):
         """Handle capture mode selection change"""
@@ -400,25 +397,7 @@ class SimpleUploadViewer:
     def on_prediction_complete(self, results, orig_image):
         """Called when prediction is complete"""
         self.current_results = results
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        cv2.imwrite(str(SAVE_DIR / f"orig_{ts}.png"), cv2.cvtColor(np.array(orig_image), cv2.COLOR_BGR2RGB))
-        #cv2.imwrite(filename, frame_to_save)
-        #print(f"Saved frame to {filename}")
-        #status_label.config(text=f"Saved frame to {filename}")
         
-        # Process the frame
-        #processed_frame, measurements = process_frame(frame_to_save)
-        #last_processed_frame = processed_frame
-        
-        # Resize processed frame to fit panel while maintaining aspect ratio
-        #display_frame = resize_with_aspect_ratio(processed_frame, 
-        #                                       width=processed_panel_width, 
-        #                                       height=processed_panel_height)
-        
-        # Convert to PIL format for tkinter
-        #cv2_image = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
-        #img = Image.fromarray(cv2_image)
-        #imgtk = ImageTk.PhotoImage(image=img)
         # Display original image
         self.display_image(self.original_canvas, orig_image)
         
@@ -429,7 +408,7 @@ class SimpleUploadViewer:
         # Update results text
         self.update_results_text(results)
         
-        #messagebox.showinfo("Success", "Image processed successfully!")
+        messagebox.showinfo("Success", "Image processed successfully!")
     
     def on_prediction_error(self, error_msg):
         """Called when prediction fails"""
@@ -908,9 +887,7 @@ OBJECT DETECTIONS:
             
             if results:
                 # Update UI with results (show captured frame in original canvas, processed in processed canvas)
-                orig_img = results.get('original_image')
-                if orig_img is None:
-                   orig_img = results.get('orig_image')
+                orig_img = results.get('original_image') or results.get('orig_image')
                 self.root.after(0, self.on_prediction_complete, results, orig_img)
                 
                 # Send result via Modbus
@@ -945,9 +922,7 @@ OBJECT DETECTIONS:
             def process_after_wait():
                 results = self.pre_post_trigger_system.process_signal_capture(self.inference_model)
                 if results:
-                    orig_img = results.get('original_image')
-                    if orig_img is None:
-                    	orig_img = results.get('orig_image')
+                    orig_img = results.get('original_image') or results.get('orig_image')
                     self.root.after(0, self.on_prediction_complete, results, orig_img)
                     result_value = 1 if results['overall_quality'] == 'GOOD' else 0
                     self.send_modbus_result(result_value)

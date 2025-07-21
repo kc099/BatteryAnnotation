@@ -14,14 +14,55 @@ class MaskRCNNDataset(Dataset):
         self.data_dir = Path(data_dir)
         self.transforms = transforms
         self.samples = self._discover_samples()
-        self.quality_map = {'GOOD': 0, 'good': 0, 'BAD': 1, 'bad': 1, 'UNKNOWN': 2, 'unknown': 2}
+        self.quality_map = {'GOOD': 0, 'good': 0, 'BAD': 1, 'bad': 1}
 
     def _discover_samples(self):
         samples = []
+        unknown_labels = ['UNKNOWN', 'unknown', 'Unknown']
+        
         for ann_file in self.data_dir.glob('*_enhanced_annotation.json'):
-            img_file = ann_file.with_name(ann_file.name.replace('_enhanced_annotation.json', '.jpg'))
-            if img_file.exists():
+            # Try to find corresponding image file with either .jpg or .png extension
+            base_name = ann_file.name.replace('_enhanced_annotation.json', '')
+            image_file_jpg = ann_file.with_name(base_name + '.jpg')
+            image_file_png = ann_file.with_name(base_name + '.png')
+            
+            # Check which image file exists
+            if image_file_jpg.exists():
+                img_file = image_file_jpg
+            elif image_file_png.exists():
+                img_file = image_file_png
+            else:
+                print(f"⚠️  No image file found for annotation: {ann_file.name}")
+                continue
+            
+            # Validate annotation and reject UNKNOWN labels
+            try:
+                with open(ann_file, 'r') as f:
+                    ann = json.load(f)
+                
+                # Check for required quality fields and reject UNKNOWN labels
+                quality_fields = ['hole_quality', 'text_quality', 'knob_quality', 'overall_quality']
+                has_unknown = False
+                
+                for field in quality_fields:
+                    if field not in ann:
+                        has_unknown = True
+                        break
+                    if ann[field] in unknown_labels:
+                        has_unknown = True
+                        break
+                
+                if has_unknown:
+                    print(f"⚠️  Rejecting annotation with UNKNOWN labels: {ann_file.name}")
+                    continue
+                
                 samples.append((img_file, ann_file))
+                
+            except (json.JSONDecodeError, KeyError) as e:
+                print(f"⚠️  Error loading annotation {ann_file.name}: {e}")
+                continue
+        
+        print(f"✅ Found {len(samples)} valid samples (excluding UNKNOWN labels)")
         return samples
 
     def __len__(self):
@@ -105,7 +146,7 @@ class MaskRCNNDataset(Dataset):
         perspective = torch.tensor(persp, dtype=torch.float32)
 
         # Other labels
-        overall_quality = self.quality_map.get(ann.get('overall_quality', 'UNKNOWN'), 2)
+        overall_quality = self.quality_map.get(ann.get('overall_quality', 'GOOD'), 0)  # Default to GOOD if missing
         overall_quality = torch.tensor(overall_quality, dtype=torch.long)
         text_color = torch.tensor(float(ann.get('text_color_present', False)), dtype=torch.float32)
         plus_area = ann.get('plus_knob_area', 0) or 0  # Handle None case

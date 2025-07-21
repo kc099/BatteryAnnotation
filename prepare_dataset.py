@@ -8,6 +8,7 @@ from tqdm import tqdm
 def validate_annotation(ann):
     """
     Silently validates an annotation file. Returns True if valid, False otherwise.
+    Rejects any annotation with UNKNOWN quality labels.
     """
     if not ann or len(ann) == 0:
         return False
@@ -19,10 +20,15 @@ def validate_annotation(ann):
     if present_components < 2:
         return False
         
-    # Check that required quality labels exist
+    # Check that required quality labels exist and are not UNKNOWN
     quality_fields = ['hole_quality', 'text_quality', 'knob_quality', 'surface_quality', 'overall_quality']
-    if any(field not in ann for field in quality_fields):
-        return False
+    unknown_labels = ['UNKNOWN', 'unknown', 'Unknown']
+    
+    for field in quality_fields:
+        if field not in ann:
+            return False
+        if ann[field] in unknown_labels:
+            return False
         
     return True
 
@@ -48,9 +54,18 @@ def prepare_dataset(source_dirs, output_dir, train_ratio=0.8, seed=42):
     valid_files = []
     for source_dir in source_dirs:
         for ann_file in tqdm(list(Path(source_dir).glob('*_enhanced_annotation.json')), desc=f"Scanning {Path(source_dir).name}"):
-            image_file = ann_file.with_name(ann_file.name.replace('_enhanced_annotation.json', '.jpg'))
+            # Try to find corresponding image file with either .jpg or .png extension
+            base_name = ann_file.name.replace('_enhanced_annotation.json', '')
+            image_file_jpg = ann_file.with_name(base_name + '.jpg')
+            image_file_png = ann_file.with_name(base_name + '.png')
             
-            if not image_file.exists():
+            # Check which image file exists
+            if image_file_jpg.exists():
+                image_file = image_file_jpg
+            elif image_file_png.exists():
+                image_file = image_file_png
+            else:
+                print(f"⚠️  No image file found for annotation: {ann_file.name}")
                 continue
             
             try:
@@ -92,6 +107,8 @@ if __name__ == '__main__':
     project_base = Path(__file__).resolve().parent.parent
 
     source_directories = [
+        project_base / 'Marked',
+        project_base / 'Prasad',
         project_base / 'extracted_frames_9182',
         project_base / 'extracted_frames_9183',
         project_base / 'extracted_frames_9198',
@@ -101,6 +118,6 @@ if __name__ == '__main__':
         
     ]
     
-    output_directory = project_base / 'data'
+    output_directory = project_base / 'data_v1'
     
     prepare_dataset(source_directories, output_directory) 
